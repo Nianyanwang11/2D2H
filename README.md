@@ -1,6 +1,5 @@
 # MathNote
 
-Live Math Notebook: 
 A handwriting math notebook for iPad and Apple Pencil, made for calculus classes.
 
 - Write math by hand. Lines with "=" are read, and every number gets a slider.
