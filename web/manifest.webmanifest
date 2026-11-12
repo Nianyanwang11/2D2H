@@ -1,0 +1,16 @@
+{
+  "name": "Live Math Notebook",
+  "short_name": "Math Notes",
+  "description": "A handwriting math notebook with live graphs: sketch a curve and get its function, draw a solid and get its 3D graph.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f3f5f4",
+  "theme_color": "#f3f5f4",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -1,0 +1,55 @@
+# XcodeGen spec for the iPad app. Generate the Xcode project with:  cd ios && xcodegen generate
+# The app is a native shell (WKWebView) around web/index.html, plus what only a native app can do:
+# Apple Pencil double-tap / squeeze, Scribble kept off the page, and the share sheet for exports.
+name: LiveMath
+options:
+  bundleIdPrefix: io.github.livemath
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+targets:
+  LiveMath:
+    type: application
+    platform: iOS
+    sources:
+      - path: LiveMath
+      - path: ../web
+        type: folder
+        buildPhase: resources
+    info:
+      path: Support/Info.plist
+      properties:
+        CFBundleDisplayName: Math Notes
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIRequiresFullScreen: false
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSCameraUsageDescription: Take a photo to put on a page.
+        NSPhotoLibraryUsageDescription: Choose a photo to put on a page.
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.livemath.notebook
+        PRODUCT_NAME: LiveMath
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_BITCODE: NO
+    scheme:
+      management:
+        shared: true
