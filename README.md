@@ -1,5 +1,6 @@
-# Live Math Notebook
+# MathNote
 
+Live Math Notebook: 
 A handwriting math notebook for iPad and Apple Pencil, made for calculus classes.
 
 - Write math by hand. Lines with "=" are read, and every number gets a slider.
@@ -14,7 +15,7 @@ There are two versions. Both are built from the same page.
 
 ### 1. The web app (no computer needed)
 
-1. On the iPad, open **https://nianyanwang11.github.io/2D2H/** in Safari. If you rename the repository, use the new name in the link.
+1. On the iPad, open **https://nianyanwang11.github.io/mathnote/** in Safari.
 2. Tap **Share → Add to Home Screen**.
 
 It opens full screen with its own icon. After the first visit it works offline, and it updates itself when you're online.
