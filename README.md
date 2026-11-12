@@ -3,6 +3,7 @@
 A handwriting math notebook for iPad and Apple Pencil, made for calculus classes.
 
 - Write math by hand. Lines with "=" are read, and every number gets a slider.
+- Made for Apple Pencil: **steady ink** takes the tremor out of shaky strokes (Off / Low / Medium / High), and **draw and hold** turns a line, circle, ellipse, rectangle, square, triangle, polygon or arc into a clean shape. Keep holding and move to resize it.
 - Sketch a curve on a 2D graph and it becomes the closest elementary function (y = x² − 2, y = 2 sin x, y = 2/x …).
 - Draw on a 3D graph the way a textbook does. A circle becomes a sphere, z = ±√(r² − x² − y²). The app also knows cones, cylinders, paraboloids, hyperboloids, saddles, boxes and planes. Curves drawn along x and y become a surface z = f(x, y).
 - Multivariable tools work on any surface: partial derivatives, level curves, gradient field, tangent plane, double integrals.
@@ -24,6 +25,7 @@ It opens full screen with its own icon. After the first visit it works offline, 
 The native app adds what a web page can't do:
 
 - **Apple Pencil double-tap and squeeze** switch between pen and eraser, following Settings → Apple Pencil.
+- **Apple Pencil Pro** gives a small haptic tap when a drawn shape snaps.
 - **Scribble** is kept from turning your ink into typed text.
 - Exports open the **share sheet** (Save to Files, AirDrop, GoodNotes …).
 
@@ -53,7 +55,7 @@ The key stays on that device and is sent only to Anthropic. Each line read costs
 
 | Path | What it is |
 |---|---|
-| `src/` | The app: `app.js` (notebook, graphs, input), `math.js` (parser, derivatives), `sketchfit.js` (sketch → function), `solidfit.js` (drawing → 3D graph), `font.js` (handwriting font), `shell.html` (page and styles), `sw.js` (offline cache) |
+| `src/` | The app: `app.js` (notebook, graphs, input), `math.js` (parser, derivatives), `sketchfit.js` (sketch → function), `solidfit.js` (drawing → 3D graph), `inkshape.js` (draw and hold → clean shape), `font.js` (handwriting font), `shell.html` (page and styles), `sw.js` (offline cache) |
 | `build.py` | Builds `web/index.html` (iPad and web app) and `dist/claude.html` (the version for Claude) |
 | `web/` | The web app as published: page, icons, manifest, offline cache |
 | `ios/` | The native iPad app: Swift sources and the XcodeGen spec `project.yml` |

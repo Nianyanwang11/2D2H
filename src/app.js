@@ -569,14 +569,14 @@ function strokeNearLine(s, l) {
   return b.cy >= lb.y0 - 0.45 * h && b.cy <= lb.y1 + 0.45 * h && b.x0 <= lb.x1 + 2.2 * h && b.x1 >= lb.x0 - 1.2 * h;
 }
 function attachToLine(s) {
-  if (s.tool === 'hl') return;
+  if (s.tool === 'hl' || s.shape) return;
   for (const l of doc.lines) {
     if (l.ignored) continue;
     if (strokeNearLine(s, l)) { s.lineId = l.id; l.strokeIds.push(s.id); lineChanged(l); return; }
   }
 }
 function detectNewLines() {
-  const pool = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic; });
+  const pool = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic && !s.shape; });
   if (!pool.length) return [];
   const created = [];
   for (const pair of findEquals(pool)) {
@@ -587,7 +587,7 @@ function detectNewLines() {
     doc.lines.push(l);
     created.push(l);
   }
-  const rest = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic; });
+  const rest = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic && !s.shape; });
   for (const c of findColumns(rest)) created.push(newColumnLine(c));
   return created;
 }
@@ -3228,7 +3228,7 @@ let spaceDown = false, tapT = null, lastTap = null, lastPenEnd = null, liveRaf =
 const DRAW_TOOLS = new Set(['pen', 'pencil', 'hl']);
 const NO_INK = '.chip, .graph, #addPage, #quickSwitch, #pop, .edit-box';
 const INPUT_KEY = STORE_KEY + ':input';
-const inputPrefs = Object.assign({ pencilOnly: null, tapUndo: true, quickSwitch: true, penSeen: false },
+const inputPrefs = Object.assign({ pencilOnly: null, tapUndo: true, quickSwitch: true, penSeen: false, steady: 1, holdShapes: true, shapeHints: 0 },
   (() => { try { return JSON.parse(localStorage.getItem(INPUT_KEY) || '{}') || {}; } catch (e) { return {}; } })());
 function saveInputPrefs() { try { localStorage.setItem(INPUT_KEY, JSON.stringify(inputPrefs)); } catch (e) { } }
 let penSeen = !!inputPrefs.penSeen;
@@ -3346,7 +3346,9 @@ function startTool(e, wx, wy, tool = ui.tool, bridge = null) {
     const el = S('g'), tail = S('path');
     if (t === 'hl') el.setAttribute('opacity', '0.42'); else if (t === 'pencil') el.setAttribute('opacity', '0.9');
     el.appendChild(tail); (t === 'hl' ? gHL : gInk).appendChild(el);
-    gesture = { ...base, type: 'draw', s, el, tail, frozenTo: 0, raw: bridge ? [bridge.slice()] : [], pr: bridge ? bridge[2] : null, last: null, vel: 0, pred: null };
+    const st = STEADY[inputPrefs.steady] || STEADY[0];
+    gesture = { ...base, type: 'draw', s, el, tail, frozenTo: 0, raw: bridge ? [bridge.slice()] : [], pr: bridge ? bridge[2] : null, last: null, vel: 0, pred: null,
+      lazyR: st.lazy / view.s, sigma: st.sigma, lz: null, pen: null, hold: null, shape: null };
     addDrawPoint(e);
   } else if (t === 'eraser') {
     gesture = { ...base, type: 'erase', hit: new Set(), last: [wx, wy] };
@@ -3378,9 +3380,25 @@ function addDrawPoint(e) {
     const x = (ce.clientX - r.left - view.tx) / view.s, y = (ce.clientY - r.top - view.ty) / view.s;
     if (g.sx != null) g.maxD = Math.max(g.maxD, Math.abs(ce.clientX - g.sx) + Math.abs(ce.clientY - g.sy));
     const p = inkPressure(g, ce);
+    g.pen = [x, y, p];
+    holdTrack(g, ce.clientX, ce.clientY);
+    if (g.shape) continue;   // after a shape snapped, the pencil resizes it (below)
+    // steady ink: the ink follows a point pulled along behind the tip, so small tremors never reach the page
+    let q = g.pen;
+    if (g.lazyR > 0) {
+      if (!g.lz) g.lz = [x, y];
+      else { const dx = x - g.lz[0], dy = y - g.lz[1], d = Math.hypot(dx, dy); if (d > g.lazyR) { g.lz[0] += dx * (d - g.lazyR) / d; g.lz[1] += dy * (d - g.lazyR) / d; } }
+      q = g.lz;
+    }
     const lp = raw[raw.length - 1];
-    if (lp && Math.hypot(x - lp[0], y - lp[1]) < minD) { lp[2] = p; continue; }
-    raw.push([x, y, p]);
+    if (lp && Math.hypot(q[0] - lp[0], q[1] - lp[1]) < minD) { lp[2] = p; continue; }
+    raw.push([q[0], q[1], p]);
+  }
+  if (g.shape) {
+    g.shapeNow = InkShape.adjust(g.shape, g.anchor, g.pen, 1 / view.s);
+    g.shapePts = shapeInk(g.shapeNow, g.shapeP);
+    if (!liveRaf) liveRaf = requestAnimationFrame(paintLive);
+    return;
   }
   // draw slightly ahead of the pencil tip (iPadOS predicts the next sample) to cut the lag
   g.pred = null;
@@ -3397,14 +3415,17 @@ const LIVE_CHUNK = 96;
 function paintLive() {
   liveRaf = 0;
   const g = gesture; if (!g || g.type !== 'draw' || !g.raw.length) return;
-  const sm = smoothPts(g.raw), st = { tool: g.s.tool, color: g.s.color, w: g.s.w };
+  const st = { tool: g.s.tool, color: g.s.color, w: g.s.w };
+  if (g.shape) { styleStrokeEl(g.tail, { ...st, pts: g.shapePts }); g.tail.removeAttribute('opacity'); return; }
+  const sm = smoothPts(g.raw);
   while (sm.length - g.frozenTo > LIVE_CHUNK + 12) {   // points this far behind the tip no longer change
     const a = Math.max(0, g.frozenTo - 4), b = g.frozenTo + LIVE_CHUNK;
     const p = S('path'); styleStrokeEl(p, { ...st, pts: sm.slice(a, b + 1) }); p.removeAttribute('opacity');
     g.el.insertBefore(p, g.tail); g.frozenTo = b;
   }
   const tip = sm.slice(Math.max(0, g.frozenTo - 4));
-  if (g.pred) tip.push(g.pred);
+  if (g.lazyR > 0 && g.pen) tip.push(g.pen);   // with steady ink, a short straight piece joins the ink to the tip
+  else if (g.pred) tip.push(g.pred);
   styleStrokeEl(g.tail, { ...st, pts: tip }); g.tail.removeAttribute('opacity');
 }
 // symmetric smoothing: removes jitter without the lag that makes stroke ends fall short
@@ -3419,12 +3440,30 @@ function smoothPts(raw) {
   }
   return out;
 }
-function finalizePts(raw) {
-  const sm = smoothPts(raw), minD = 0.8 / view.s, out = [];
+function steadyPts(raw, sigmaPx) {
+  const step = 1 / view.s, P = [[raw[0][0], raw[0][1], raw[0][2]]];
+  let carry = 0;
+  for (let i = 1; i < raw.length; i++) {   // even spacing along the stroke (1 screen pixel), pressure carried along
+    const a = raw[i - 1], b = raw[i], seg = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    let t = step - carry;
+    while (t <= seg) { const k = t / seg; P.push([a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k]); t += step; }
+    carry = seg - (t - step);
+  }
+  const last = raw[raw.length - 1]; P.push(last.slice());
+  const n = P.length, sg = sigmaPx, R = Math.ceil(3 * sg), W = []; for (let k = -R; k <= R; k++) W.push(Math.exp(-k * k / (2 * sg * sg)));
+  return P.map((p, i) => {
+    const r = Math.min(R, i, n - 1 - i); if (r < 1) return p;   // symmetric window: the ends stay where they were drawn
+    let x = 0, y = 0, w = 0; for (let k = -r; k <= r; k++) { const q = P[i + k], c = W[k + R]; x += q[0] * c; y += q[1] * c; w += c; }
+    return [x / w, y / w, p[2]];
+  });
+}
+function finalizePts(raw, sigmaPx = 0) {
+  // a steadied stroke is smooth, so points ~2 px apart describe it fully (and keep rounding from adding wiggle)
+  const steady = sigmaPx > 0 && raw.length > 4, sm = steady ? steadyPts(raw, sigmaPx) : smoothPts(raw), minD = (steady ? 2 : 0.8) / view.s, out = [];
   for (let i = 0; i < sm.length; i++) {
     const p = sm[i], q = out[out.length - 1];
     if (q && i < sm.length - 1 && Math.hypot(p[0] - q[0], p[1] - q[1]) < minD) continue;
-    out.push([r1(p[0]), r1(p[1]), r2(p[2])]);
+    out.push(steady ? [r2(p[0]), r2(p[1]), r2(p[2])] : [r1(p[0]), r1(p[1]), r2(p[2])]);
   }
   return out;
 }
@@ -3534,10 +3573,15 @@ function finishGesture(g, e, cancelled) {
 let pendingDot = null, lockTap = null;
 function commitDraw(g, cancelled) {
   if (liveRaf) { cancelAnimationFrame(liveRaf); liveRaf = 0; }
+  if (g.hold) clearTimeout(g.hold.timer);
   g.el.remove();
   if (!g.raw.length) return;
   const s = g.s;
-  s.pts = finalizePts(g.raw);
+  if (g.shape && !cancelled) { s.pts = g.shapePts.map(p => [r1(p[0]), r1(p[1]), r2(p[2])]); s.shape = g.shapeNow.type; }
+  else {
+    if (g.lazyR > 0 && g.pen) { const lp = g.raw[g.raw.length - 1]; if (Math.hypot(g.pen[0] - lp[0], g.pen[1] - lp[1]) > 0.3 / view.s) g.raw.push(g.pen.slice()); }
+    s.pts = finalizePts(g.raw, g.sigma);
+  }
   if (g.pointerType === 'pen') { const lp = s.pts[s.pts.length - 1]; lastPenEnd = { t: performance.now(), x: lp[0], y: lp[1], p: lp[2], cancelled }; }
   lastInkAt = performance.now();
   if (!cancelled && g.maxD < 8 && performance.now() - g.t0 < 320) {
@@ -3553,6 +3597,34 @@ function commitDraw(g, cancelled) {
   }
   flushPendingDot();
   storeStroke(s);
+}
+/* ---------- draw and hold: the stroke becomes a clean shape (like GoodNotes) ----------
+   Hold the pencil still at the end of a line, circle, rectangle, triangle… for half a second: it snaps.
+   Keep holding and move: a line's end follows, other shapes grow or shrink about their centre. Lift to keep it. */
+const HOLD_MS = 500, HOLD_PX = 5;
+// steady ink: how far the ink trails the tip (screen px) and how much the finished stroke is evened out
+const STEADY = [{ name: 'Off', lazy: 0, sigma: 0 }, { name: 'Low', lazy: 1.5, sigma: 1.2 }, { name: 'Medium', lazy: 3.5, sigma: 2.5 }, { name: 'High', lazy: 7, sigma: 4.5 }];
+function holdTrack(g, cx, cy) {
+  if (g.shape || !inputPrefs.holdShapes) return;
+  const h = g.hold;
+  if (h && Math.hypot(cx - h.x, cy - h.y) <= HOLD_PX) return;
+  if (h) clearTimeout(h.timer);
+  g.hold = { x: cx, y: cy, timer: setTimeout(() => holdFired(g), HOLD_MS) };
+}
+function shapeInk(sh, p) { return InkShape.points(sh, 2.5 / view.s).map(q => [q[0], q[1], p]); }
+function holdFired(g) {
+  if (gesture !== g || g.shape || g.raw.length < 4) return;
+  const pts = g.raw.map(p => [p[0], p[1]]); if (g.pen) pts.push([g.pen[0], g.pen[1]]);
+  let sh = null; try { sh = InkShape.recognize(pts, 1 / view.s); } catch (e) { sh = null; }
+  if (!sh) return;
+  const ps = g.raw.map(p => p[2]).sort((a, b) => a - b);
+  g.shape = sh; g.shapeNow = sh; g.anchor = g.pen ? [g.pen[0], g.pen[1]] : pts[pts.length - 1]; g.shapeP = ps[ps.length >> 1] || 0.62;
+  g.shapePts = shapeInk(sh, g.shapeP);
+  while (g.el.firstChild !== g.tail) g.el.removeChild(g.el.firstChild);   // the shaky pieces go, the clean shape takes their place
+  g.frozenTo = 0;
+  paintLive();
+  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.lmnHaptic) { try { window.webkit.messageHandlers.lmnHaptic.postMessage({ x: g.hold.x, y: g.hold.y }); } catch (e) { } }
+  if (inputPrefs.shapeHints < 3) { inputPrefs.shapeHints++; saveInputPrefs(); flash(`${InkShape.NAMES[sh.type]} · keep holding and move to resize`); }
 }
 function storeStroke(s) {
   transact(() => { addStroke(s); attachToLine(s); });
@@ -3851,6 +3923,7 @@ function renderSwatches() {
   const ws = WIDTHS[t];
   wd.innerHTML = ws ? ws.map((w, i) => `<button class="wd" data-w="${i}" aria-label="${['Thin', 'Medium', 'Thick'][i]}" aria-pressed="${ui.width[t] === i}"><span style="--d:${4 + i * 4}px"></span></button>`).join('') : '';
   sw.hidden = !cols; wd.hidden = !ws;
+  const pb = $('#penBtn'); if (pb) pb.hidden = !DRAW_TOOLS.has(t);
 }
 $('#swatches').addEventListener('click', e => { const b = e.target.closest('.sw'); if (!b) return; ui.color[ui.tool] = b.dataset.c; renderSwatches(); });
 $('#widths').addEventListener('click', e => { const b = e.target.closest('.wd'); if (!b) return; ui.width[ui.tool] = Number(b.dataset.w); renderSwatches(); });
@@ -3864,8 +3937,18 @@ function toggleMenu(btn, menu) {
   menu.hidden = !open; btn.setAttribute('aria-expanded', String(open));
 }
 $('#paperBtn').onclick = e => { e.stopPropagation(); toggleMenu($('#paperBtn'), $('#paperMenu')); };
+function markPenMenu() {
+  document.querySelectorAll('#penMenu [data-steady]').forEach(b => b.setAttribute('aria-checked', String(Number(b.dataset.steady) === inputPrefs.steady)));
+  const h = $('#penMenu [data-do="holdshapes"]'); if (h) h.setAttribute('aria-checked', String(!!inputPrefs.holdShapes));
+}
+$('#penBtn').onclick = e => { e.stopPropagation(); markPenMenu(); toggleMenu($('#penBtn'), $('#penMenu')); };
+$('#penMenu').addEventListener('click', e => {
+  const st = e.target.closest('[data-steady]');
+  if (st) { inputPrefs.steady = Number(st.dataset.steady); saveInputPrefs(); markPenMenu(); flash(`Steady ink: ${STEADY[inputPrefs.steady].name}`); return; }
+  if (e.target.closest('[data-do="holdshapes"]')) { inputPrefs.holdShapes = !inputPrefs.holdShapes; saveInputPrefs(); markPenMenu(); flash(inputPrefs.holdShapes ? 'Hold to make shapes: on' : 'Hold to make shapes: off'); }
+});
 $('#moreBtn').onclick = e => { e.stopPropagation(); toggleMenu($('#moreBtn'), $('#moreMenu')); };
-document.addEventListener('pointerdown', e => { if (!e.target.closest('.menu, #paperBtn, #moreBtn, #newBtn, #graphBtn, .more, #libFolderMenu')) closeMenus(); if (lmenu && e.target.closest('#bar, #sidebar, #home')) closeLineMenu(); });
+document.addEventListener('pointerdown', e => { if (!e.target.closest('.menu, #paperBtn, #moreBtn, #newBtn, #graphBtn, #penBtn, .more, #libFolderMenu')) closeMenus(); if (lmenu && e.target.closest('#bar, #sidebar, #home')) closeLineMenu(); });
 $('#paperMenu').addEventListener('click', e => { const all = e.target.closest('[data-tplall]'); if (all) { const p = doc.pageList[currentPage()]; setTemplate(p ? p.t : doc.template, true); closeMenus(); toast('Every page now uses this paper'); return; } const b = e.target.closest('[data-tpl]'); if (!b) return; setTemplate(b.dataset.tpl); closeMenus(); });
 function markPaperMenu() { const p = doc.pageList && doc.pageList[currentNb != null ? currentPage() : 0]; const t = p ? p.t : doc.template; document.querySelectorAll('[data-tpl]').forEach(b => b.setAttribute('aria-checked', String(b.dataset.tpl === t))); }
 $('#addPage').onclick = e => { e.stopPropagation(); openPageMenu(e.currentTarget, doc.pages); };

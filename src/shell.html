@@ -316,6 +316,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .pimg { image-rendering: auto; }
 #bmBtn .bmfill { fill: none; }
 #bmBtn[aria-pressed="true"] .bmfill { fill: currentColor; }
+.menu .seg { display: flex; margin: 4px 10px 2px; border-radius: 6px; box-shadow: inset 0 0 0 1px var(--rule); padding: 2px; gap: 2px; }
+.menu .seg button { flex: 1; width: auto; justify-content: center; padding: 6px 4px; font: 13px var(--font); border-radius: 4px; }
+.menu .seg button[aria-checked="true"] { background: var(--accent); color: #fff; }
+.menu .seg button[aria-checked="true"]::after { content: none; }
+.menu-note { margin: 4px 12px 8px; font: 12px/1.4 var(--font); color: var(--muted); max-width: 260px; }
+#penMenu { width: 290px; }
 .menu-title { padding: 8px 12px 4px; font: 600 12px var(--font); color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
 .pv.mini { width: 26px; aspect-ratio: 3 / 4; border-radius: 6px; flex: none; background-size: 6px 6px; }
 .pv-lined.mini { background-size: 100% 7px; background-image: linear-gradient(transparent 6px, #d6e8e0 7px); }
@@ -438,7 +444,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
   #bar > .spacer { display: none; }
   #bar > .group[aria-label="Pages and files"], #autoread, #paperBtn, #moreBtn { order: 1; }
   #bar > .group[aria-label="Writing tools"] { order: 3; }
-  #swatches { order: 4; margin-left: 4px; } #widths { order: 5; }
+  #swatches { order: 4; margin-left: 4px; } #widths { order: 5; } #penBtn { order: 5; }
   #bar > .group[aria-label="History"] { order: 6; margin-left: auto; }
   .tb { width: 44px; height: 38px; }
 }
@@ -514,6 +520,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
   </div>
   <div id="swatches" aria-label="Colors"></div>
   <div id="widths" aria-label="Line width"></div>
+  <button class="tb" id="penBtn" aria-label="Pen feel: steady ink and hold to make shapes" title="Pen feel: steady ink, hold to make shapes" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5c1-1.4 2-1.4 3 0s2 1.4 3 0" opacity=".5"/><path d="M11.5 7.5H21"/><circle cx="8" cy="16.5" r="4" stroke-dasharray="2.2 1.8" opacity=".5"/><circle cx="16.5" cy="16.5" r="4"/></svg></button>
   <div class="group" role="group" aria-label="History">
     <button class="tb" id="undo" aria-label="Undo" title="Undo (Ctrl+Z)" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></button>
     <button class="tb" id="redo" aria-label="Redo" title="Redo (Ctrl+Shift+Z)" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg></button>
@@ -630,6 +637,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
   <button data-do="clear" role="menuitem" class="danger">Clear notebook</button>
 </div>
 <div id="cardMenu" class="menu" hidden role="menu"></div>
+<div id="penMenu" class="menu" hidden role="menu" aria-label="Pen feel">
+  <div class="menu-title">Steady ink</div>
+  <div class="seg" role="radiogroup" aria-label="Steady ink">
+    <button data-steady="0" role="radio" aria-checked="false">Off</button><button data-steady="1" role="radio" aria-checked="true">Low</button><button data-steady="2" role="radio" aria-checked="false">Medium</button><button data-steady="3" role="radio" aria-checked="false">High</button>
+  </div>
+  <p class="menu-note">Smooths shaky strokes as you write. Higher keeps lines steadier but rounds sharp corners a little.</p>
+  <hr>
+  <button data-do="holdshapes" role="menuitemcheckbox" aria-checked="true">Hold to make shapes</button>
+  <p class="menu-note">Draw a line, circle, rectangle, triangle or arc and hold the pencil still: it snaps to a clean shape. Keep holding and move to resize, then lift.</p>
+</div>
 <div id="graphMenu" class="menu" hidden role="menu" aria-label="Insert a graph">
   <div class="menu-title">Insert a graph</div>
   <button data-ins="2d" role="menuitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 3.5v16h16"/><path d="M7 15.5c2.2-.2 3.2-7.2 5.6-7.2 2.2 0 2.6 4.6 6.4 3.6"/></svg><span class="gm-t">2D graph<small>Draw a curve: it becomes y = f(x) &nbsp;(G)</small></span></button>
@@ -666,6 +683,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 /*@@FONT@@*/
 /*@@FIT@@*/
 /*@@SOLID@@*/
+/*@@SHAPE@@*/
 /*@@APP@@*/
 </script>
 </body>

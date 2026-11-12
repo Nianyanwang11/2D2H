@@ -3,10 +3,12 @@ import WebKit
 
 /// The whole app: the notebook page in a WKWebView, plus the things only a native iPad app can do —
 /// Apple Pencil double-tap and squeeze switch pen ⇄ eraser (as set in Settings → Apple Pencil),
-/// Scribble is kept from turning ink into typed text, and exports go to the share sheet.
+/// Apple Pencil Pro taps your hand when a drawn shape snaps, Scribble is kept from turning ink into
+/// typed text, and exports go to the share sheet.
 final class NotebookViewController: UIViewController {
     private static let paper = UIColor(red: 0xf3 / 255, green: 0xf5 / 255, blue: 0xf4 / 255, alpha: 1)
     private var webView: WKWebView!
+    private var canvasFeedback: AnyObject?   // UICanvasFeedbackGenerator (Apple Pencil Pro haptics, iPadOS 17.5+)
 
     override func loadView() {
         let config = WKWebViewConfiguration()
@@ -15,6 +17,7 @@ final class NotebookViewController: UIViewController {
             config.setURLSchemeHandler(BundleSchemeHandler(root: web), forURLScheme: BundleSchemeHandler.scheme)
         }
         config.userContentController.add(WeakScriptHandler(self), name: "lmnSave")
+        config.userContentController.add(WeakScriptHandler(self), name: "lmnHaptic")
         config.allowsInlineMediaPlayback = true
 
         let webView = WKWebView(frame: .zero, configuration: config)
@@ -79,6 +82,15 @@ final class NotebookViewController: UIViewController {
         }
     }
 
+    /// A shape snapped into place: Apple Pencil Pro gives a small tap in the hand (other pencils have no haptics).
+    private func snapFeedback(at point: CGPoint) {
+        if #available(iOS 17.5, *) {
+            let generator = (canvasFeedback as? UICanvasFeedbackGenerator) ?? UICanvasFeedbackGenerator(view: webView)
+            canvasFeedback = generator
+            generator.alignmentOccurred(at: point)
+        }
+    }
+
     private func share(fileNamed name: String, data: Data) {
         let safeName = name.replacingOccurrences(of: "/", with: "-")
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -126,16 +138,23 @@ extension NotebookViewController: UIScribbleInteractionDelegate {
     func scribbleInteraction(_ interaction: UIScribbleInteraction, shouldBeginAt location: CGPoint) -> Bool { false }
 }
 
-// MARK: - Files from the page (PDF, PNG, notebook file) → share sheet
+// MARK: - Messages from the page: files to share (PDF, PNG, notebook file), haptics when a shape snaps
 
 extension NotebookViewController: WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == "lmnSave",
-              let body = message.body as? [String: Any],
-              let name = body["filename"] as? String,
-              let base64 = body["data"] as? String,
-              let data = Data(base64Encoded: base64) else { return }
-        share(fileNamed: name, data: data)
+        guard let body = message.body as? [String: Any] else { return }
+        switch message.name {
+        case "lmnSave":
+            guard let name = body["filename"] as? String,
+                  let base64 = body["data"] as? String,
+                  let data = Data(base64Encoded: base64) else { return }
+            share(fileNamed: name, data: data)
+        case "lmnHaptic":
+            let x = (body["x"] as? NSNumber)?.doubleValue ?? 0, y = (body["y"] as? NSNumber)?.doubleValue ?? 0
+            snapFeedback(at: CGPoint(x: x, y: y))
+        default:
+            break
+        }
     }
 }
 

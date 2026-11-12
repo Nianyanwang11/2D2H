@@ -316,6 +316,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .pimg { image-rendering: auto; }
 #bmBtn .bmfill { fill: none; }
 #bmBtn[aria-pressed="true"] .bmfill { fill: currentColor; }
+.menu .seg { display: flex; margin: 4px 10px 2px; border-radius: 6px; box-shadow: inset 0 0 0 1px var(--rule); padding: 2px; gap: 2px; }
+.menu .seg button { flex: 1; width: auto; justify-content: center; padding: 6px 4px; font: 13px var(--font); border-radius: 4px; }
+.menu .seg button[aria-checked="true"] { background: var(--accent); color: #fff; }
+.menu .seg button[aria-checked="true"]::after { content: none; }
+.menu-note { margin: 4px 12px 8px; font: 12px/1.4 var(--font); color: var(--muted); max-width: 260px; }
+#penMenu { width: 290px; }
 .menu-title { padding: 8px 12px 4px; font: 600 12px var(--font); color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
 .pv.mini { width: 26px; aspect-ratio: 3 / 4; border-radius: 6px; flex: none; background-size: 6px 6px; }
 .pv-lined.mini { background-size: 100% 7px; background-image: linear-gradient(transparent 6px, #d6e8e0 7px); }
@@ -438,7 +444,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
   #bar > .spacer { display: none; }
   #bar > .group[aria-label="Pages and files"], #autoread, #paperBtn, #moreBtn { order: 1; }
   #bar > .group[aria-label="Writing tools"] { order: 3; }
-  #swatches { order: 4; margin-left: 4px; } #widths { order: 5; }
+  #swatches { order: 4; margin-left: 4px; } #widths { order: 5; } #penBtn { order: 5; }
   #bar > .group[aria-label="History"] { order: 6; margin-left: auto; }
   .tb { width: 44px; height: 38px; }
 }
@@ -514,6 +520,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
   </div>
   <div id="swatches" aria-label="Colors"></div>
   <div id="widths" aria-label="Line width"></div>
+  <button class="tb" id="penBtn" aria-label="Pen feel: steady ink and hold to make shapes" title="Pen feel: steady ink, hold to make shapes" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5c1-1.4 2-1.4 3 0s2 1.4 3 0" opacity=".5"/><path d="M11.5 7.5H21"/><circle cx="8" cy="16.5" r="4" stroke-dasharray="2.2 1.8" opacity=".5"/><circle cx="16.5" cy="16.5" r="4"/></svg></button>
   <div class="group" role="group" aria-label="History">
     <button class="tb" id="undo" aria-label="Undo" title="Undo (Ctrl+Z)" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></button>
     <button class="tb" id="redo" aria-label="Redo" title="Redo (Ctrl+Shift+Z)" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg></button>
@@ -630,6 +637,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
   <button data-do="clear" role="menuitem" class="danger">Clear notebook</button>
 </div>
 <div id="cardMenu" class="menu" hidden role="menu"></div>
+<div id="penMenu" class="menu" hidden role="menu" aria-label="Pen feel">
+  <div class="menu-title">Steady ink</div>
+  <div class="seg" role="radiogroup" aria-label="Steady ink">
+    <button data-steady="0" role="radio" aria-checked="false">Off</button><button data-steady="1" role="radio" aria-checked="true">Low</button><button data-steady="2" role="radio" aria-checked="false">Medium</button><button data-steady="3" role="radio" aria-checked="false">High</button>
+  </div>
+  <p class="menu-note">Smooths shaky strokes as you write. Higher keeps lines steadier but rounds sharp corners a little.</p>
+  <hr>
+  <button data-do="holdshapes" role="menuitemcheckbox" aria-checked="true">Hold to make shapes</button>
+  <p class="menu-note">Draw a line, circle, rectangle, triangle or arc and hold the pencil still: it snaps to a clean shape. Keep holding and move to resize, then lift.</p>
+</div>
 <div id="graphMenu" class="menu" hidden role="menu" aria-label="Insert a graph">
   <div class="menu-title">Insert a graph</div>
   <button data-ins="2d" role="menuitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 3.5v16h16"/><path d="M7 15.5c2.2-.2 3.2-7.2 5.6-7.2 2.2 0 2.6 4.6 6.4 3.6"/></svg><span class="gm-t">2D graph<small>Draw a curve: it becomes y = f(x) &nbsp;(G)</small></span></button>
@@ -2083,6 +2100,237 @@ const SolidFit = (() => {
 })();
 if (typeof module !== 'undefined') module.exports = { SolidFit };
 
+/* ===== InkShape: draw a shape, hold the pencil still, and it becomes a clean one (like GoodNotes) =====
+   recognize(pts, px)  pts: [[x, y], ...] in any units, px = how long one screen pixel is in those units
+                       → { type: 'line' | 'circle' | 'ellipse' | 'triangle' | 'rectangle' | 'square' | 'polygon'
+                                  | 'polyline' | 'arc', ...geometry } or null (leave the stroke as drawn)
+   points(shape, step) → points along the shape (closed shapes end where they start)
+   adjust(shape, anchor, pen, px) → the shape after the pencil, still down, moved from anchor to pen:
+                       a line's end follows the pencil; other shapes grow or shrink about their centre
+   Shaky, overshooting and slightly open strokes are expected; anything that isn't clearly a shape is left alone. */
+const InkShape = (() => {
+  const H = Math.hypot, PI = Math.PI;
+  function resample(pts, step) {
+    if (!pts.length) return [];
+    const out = [[pts[0][0], pts[0][1]]];
+    let px = pts[0][0], py = pts[0][1], carry = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const qx = pts[i][0], qy = pts[i][1];
+      let seg = H(qx - px, qy - py);
+      while (carry + seg >= step && seg > 0) {
+        const t = (step - carry) / seg; px += (qx - px) * t; py += (qy - py) * t; seg = H(qx - px, qy - py); carry = 0; out.push([px, py]);
+      }
+      carry += seg; px = qx; py = qy;
+    }
+    const l = pts[pts.length - 1], o = out[out.length - 1];
+    if (H(l[0] - o[0], l[1] - o[1]) > step * 0.3) out.push([l[0], l[1]]);
+    return out;
+  }
+  const segD = (p, a, b) => { const vx = b[0] - a[0], vy = b[1] - a[1], L = vx * vx + vy * vy; let t = L ? ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / L : 0; t = Math.max(0, Math.min(1, t)); return H(p[0] - a[0] - t * vx, p[1] - a[1] - t * vy); };
+  function dp(P, i0, i1, eps, keep) {   // Douglas–Peucker on P[i0..i1]
+    let best = -1, bd = eps;
+    for (let i = i0 + 1; i < i1; i++) { const d = segD(P[i], P[i0], P[i1]); if (d > bd) { bd = d; best = i; } }
+    if (best < 0) return;
+    dp(P, i0, best, eps, keep); keep.push(best); dp(P, best, i1, eps, keep);
+  }
+  const meanDistToPoly = (P, V, closed) => {
+    let s = 0;
+    for (const p of P) { let m = Infinity; const n = closed ? V.length : V.length - 1; for (let i = 0; i < n; i++) m = Math.min(m, segD(p, V[i], V[(i + 1) % V.length])); s += m; }
+    return s / P.length;
+  };
+  const angOf = (a, b) => Math.atan2(b[1] - a[1], b[0] - a[0]);
+  const turn = (a, b, c) => { let d = angOf(b, c) - angOf(a, b); while (d > PI) d -= 2 * PI; while (d < -PI) d += 2 * PI; return Math.abs(d); };
+  // drop vertices where the outline barely turns, and vertices crowded together
+  function cleanVerts(V, closed, minLen) {
+    let changed = true;
+    while (changed && V.length > (closed ? 3 : 2)) {
+      changed = false;
+      const n = V.length;
+      for (let i = closed ? 0 : 1; i < (closed ? n : n - 1); i++) {
+        const a = V[(i - 1 + n) % n], b = V[i], c = V[(i + 1) % n];
+        if (turn(a, b, c) < 0.38 || H(b[0] - a[0], b[1] - a[1]) < minLen) { V.splice(i, 1); changed = true; break; }
+      }
+    }
+    return V;
+  }
+  const rot = (p, c, a) => { const s = Math.sin(a), co = Math.cos(a), x = p[0] - c[0], y = p[1] - c[1]; return [c[0] + x * co - y * s, c[1] + x * s + y * co]; };
+  // turn a nearly level or upright shape so it is exactly level or upright
+  function level(V, closed, tol = 5 * PI / 180) {
+    let bestDiff = Infinity;
+    const n = closed ? V.length : V.length - 1;
+    for (let i = 0; i < n; i++) {
+      const a = angOf(V[i], V[(i + 1) % V.length]), q = Math.round(a / (PI / 2)) * (PI / 2), d = q - a;
+      if (Math.abs(d) < Math.abs(bestDiff)) bestDiff = d;
+    }
+    if (Math.abs(bestDiff) > tol) return V;
+    const c = V.reduce((s, p) => [s[0] + p[0] / V.length, s[1] + p[1] / V.length], [0, 0]);
+    return V.map(p => rot(p, c, bestDiff));
+  }
+  function snapAngle(a, b, tol = 4 * PI / 180) {   // a line close to level, upright or 45° becomes exactly that
+    const ang = angOf(a, b), q = Math.round(ang / (PI / 4)) * (PI / 4);
+    if (Math.abs(q - ang) > tol) return b;
+    const L = H(b[0] - a[0], b[1] - a[1]);
+    return [a[0] + L * Math.cos(q), a[1] + L * Math.sin(q)];
+  }
+  function fitCircle(P) {   // algebraic (Kåsa) fit: x² + y² + Dx + Ey + F = 0
+    let sx = 0, sy = 0; for (const p of P) { sx += p[0]; sy += p[1]; } const mx = sx / P.length, my = sy / P.length;
+    let Suu = 0, Svv = 0, Suv = 0, Suuu = 0, Svvv = 0, Suvv = 0, Svuu = 0;
+    for (const p of P) { const u = p[0] - mx, v = p[1] - my; Suu += u * u; Svv += v * v; Suv += u * v; Suuu += u * u * u; Svvv += v * v * v; Suvv += u * v * v; Svuu += v * u * u; }
+    const det = Suu * Svv - Suv * Suv; if (Math.abs(det) < 1e-9) return null;
+    const b1 = (Suuu + Suvv) / 2, b2 = (Svvv + Svuu) / 2;
+    const uc = (b1 * Svv - b2 * Suv) / det, vc = (b2 * Suu - b1 * Suv) / det;
+    const c = [mx + uc, my + vc]; let r = 0; for (const p of P) r += H(p[0] - c[0], p[1] - c[1]); r /= P.length;
+    let e = 0; for (const p of P) e += Math.abs(H(p[0] - c[0], p[1] - c[1]) - r); e /= P.length;
+    return { c, r, err: e / Math.max(r, 1e-9) };
+  }
+  function fitEllipse(P) {   // principal axes, half the extent along each, error as a share of the radius
+    let mx = 0, my = 0; for (const p of P) { mx += p[0]; my += p[1]; } mx /= P.length; my /= P.length;
+    let xx = 0, yy = 0, xy = 0; for (const p of P) { const u = p[0] - mx, v = p[1] - my; xx += u * u; yy += v * v; xy += u * v; }
+    const ang = 0.5 * Math.atan2(2 * xy, xx - yy), ca = Math.cos(ang), sa = Math.sin(ang);
+    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+    for (const p of P) { const u = (p[0] - mx) * ca + (p[1] - my) * sa, v = -(p[0] - mx) * sa + (p[1] - my) * ca; u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v); }
+    const a = (u1 - u0) / 2, b = (v1 - v0) / 2, cu = (u0 + u1) / 2, cv = (v0 + v1) / 2;
+    const c = [mx + cu * ca - cv * sa, my + cu * sa + cv * ca];
+    if (a < 1e-9 || b < 1e-9) return null;
+    let e = 0; for (const p of P) { const u = (p[0] - c[0]) * ca + (p[1] - c[1]) * sa, v = -(p[0] - c[0]) * sa + (p[1] - c[1]) * ca; e += Math.abs(Math.sqrt((u / a) ** 2 + (v / b) ** 2) - 1); }
+    return { c, a, b, ang, err: e / P.length };
+  }
+
+  // the pencil wobbles a little while it's held still at the end (and as it lands): drop that
+  function trimHold(pts, px) {
+    let e = pts.length - 1; const last = pts[e];
+    while (e > 1 && H(pts[e - 1][0] - last[0], pts[e - 1][1] - last[1]) < 5 * px) e--;
+    let s = 0; const first = pts[0];
+    while (s < e - 1 && H(pts[s + 1][0] - first[0], pts[s + 1][1] - first[1]) < 3 * px) s++;
+    const out = pts.slice(s, e); out.push(last); return out;
+  }
+  // a real corner turns sharply right at the vertex; a smooth bend (a wave, an S) turns gradually
+  function sharpCorners(P, idx, V) {
+    const m = Math.max(3, Math.round(P.length * 0.04));
+    for (let k = 1; k < idx.length - 1; k++) {
+      const i = idx[k]; if (i - m < 0 || i + m >= P.length) return false;
+      const local = turn(P[i - m], P[i], P[i + m]), whole = turn(V[k - 1], V[k], V[k + 1]);
+      if (whole < 0.6 || local < 0.6 * whole) return false;
+    }
+    return true;
+  }
+  function recognize(pts, px = 1) {
+    if (!pts || pts.length < 2) return null;
+    const P0 = resample(trimHold(pts, px), 2 * px), n = P0.length;
+    // a light moving average takes out the tremor, so lengths and corners are those of the intended shape
+    const P = P0.map((p, i) => { if (i < 2 || i > n - 3) return p; let x = 0, y = 0; for (let k = -2; k <= 2; k++) { x += P0[i + k][0]; y += P0[i + k][1]; } return [x / 5, y / 5]; });
+    if (n < 6) return null;
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const p of P) { x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); y0 = Math.min(y0, p[1]); y1 = Math.max(y1, p[1]); }
+    const D = H(x1 - x0, y1 - y0), L = (n - 1) * 2 * px;
+    if (L < 22 * px || D < 14 * px) return null;
+    let L2 = 0; for (let i = 1; i < n; i++) L2 += H(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]);
+    const A = P[0], B = P[n - 1], chord = H(B[0] - A[0], B[1] - A[1]);
+    // a straight line
+    let dev = 0, dev2 = 0; for (const p of P) { const d = segD(p, A, B); dev = Math.max(dev, d); dev2 += d * d; } dev2 = Math.sqrt(dev2 / n);
+    if (chord > 0.88 * L2 && dev2 <= Math.max(2.5 * px, 0.035 * chord) && dev <= Math.max(6 * px, 0.09 * chord)) return { type: 'line', a: A.slice(), b: snapAngle(A, B) };
+    // closed: the end comes back to the start, or runs on past it (an overshoot) or stops just short
+    const near = (p, i0, i1) => { let m = Infinity; for (let i = i0; i < i1; i++) m = Math.min(m, H(P[i][0] - p[0], P[i][1] - p[1])); return m; };
+    const q = Math.floor(n * 0.3);
+    const closed = chord < Math.max(0.22 * D, 0.1 * L2) || near(B, 0, q) < 0.12 * D || near(A, n - q, n) < 0.12 * D;
+    if (closed) {
+      // the loop's corners: split at the point farthest from the start, simplify both halves
+      let far = 0, fd = 0; for (let i = 1; i < n; i++) { const d = H(P[i][0] - A[0], P[i][1] - A[1]); if (d > fd) { fd = d; far = i; } }
+      const keep = [0]; dp(P, 0, far, 0.07 * D, keep); keep.push(far); dp(P, far, n - 1, 0.07 * D, keep);
+      keep.sort((a, b) => a - b);
+      let V = keep.map(i => P[i].slice());
+      V = cleanVerts(V, true, 0.12 * D);
+      const ell = fitEllipse(P);
+      const R = ell ? (ell.a + ell.b) / 2 : D / 2;
+      const polyErr = V.length >= 3 ? meanDistToPoly(P, V, true) / R : Infinity;
+      const ellErr = ell ? ell.err : Infinity;
+      const sharp = V.length >= 3 && V.length <= 6;
+      if (sharp && (polyErr < 0.6 * ellErr || polyErr < 0.035) && polyErr < 0.085) return polygon(V);
+      if (ellErr < 0.13) {
+        if (ell.b / ell.a > 0.86) return { type: 'circle', c: ell.c, r: R };
+        let ang = ell.ang; const q = Math.round(ang / (PI / 2)) * (PI / 2); if (Math.abs(q - ang) < 7 * PI / 180) ang = q;
+        return { type: 'ellipse', c: ell.c, a: ell.a, b: ell.b, ang };
+      }
+      if (sharp && polyErr < 0.085) return polygon(V);
+      return null;
+    }
+    // open: a corner-to-corner polyline (axes, an angle) or a circular arc
+    const keep = [0]; dp(P, 0, n - 1, 0.06 * D, keep); keep.push(n - 1); keep.sort((a, b) => a - b);
+    let V = cleanVerts(keep.map(i => P[i].slice()), false, 0.1 * D);
+    const idx = V.map(v => P.findIndex(p => p[0] === v[0] && p[1] === v[1]));
+    const plErr = V.length >= 3 && V.length <= 4 && sharpCorners(P0, idx, V) ? meanDistToPoly(P, V, false) / D : Infinity;
+    const cf = fitCircle(P);
+    let arc = null;
+    if (cf && cf.err < 0.06 && cf.r < 4 * D) {
+      let sweep = 0, prev = Math.atan2(P[0][1] - cf.c[1], P[0][0] - cf.c[0]); const a0 = prev;
+      for (let i = 1; i < n; i++) { const a = Math.atan2(P[i][1] - cf.c[1], P[i][0] - cf.c[0]); let d = a - prev; while (d > PI) d -= 2 * PI; while (d < -PI) d += 2 * PI; sweep += d; prev = a; }
+      if (Math.abs(sweep) > 0.6 && Math.abs(sweep) < 5.8) arc = { type: 'arc', c: cf.c, r: cf.r, a0, sweep, err: cf.err };
+    }
+    if (plErr < 0.03 && (!arc || plErr < arc.err * 0.5)) {
+      // an L or a set of axes drawn nearly level and upright becomes exactly level and upright
+      const orth = V.every((p, i) => i === 0 || (() => { const a = angOf(V[i - 1], p), q = Math.round(a / (PI / 2)) * (PI / 2); return Math.abs(q - a) < 7 * PI / 180; })());
+      if (orth) for (let i = 1; i < V.length; i++) { const a = V[i - 1], b = V[i]; if (Math.abs(b[0] - a[0]) > Math.abs(b[1] - a[1])) b[1] = a[1]; else b[0] = a[0]; }
+      return { type: 'polyline', v: V, orth };
+    }
+    if (arc) { delete arc.err; return arc; }
+    return null;
+  }
+  function polygon(V) {
+    if (V.length === 4) {
+      const ang = [0, 1, 2, 3].map(i => turn(V[(i + 3) % 4], V[i], V[(i + 1) % 4]));
+      if (ang.every(a => Math.abs(a - PI / 2) < 0.3)) {   // a rectangle: average the sides' directions
+        let s = 0, co = 0; for (let i = 0; i < 4; i++) { const a = angOf(V[i], V[(i + 1) % 4]) * 4; s += Math.sin(a); co += Math.cos(a); }
+        let th = Math.atan2(s, co) / 4; const q = Math.round(th / (PI / 2)) * (PI / 2); if (Math.abs(q - th) < 6 * PI / 180) th = q;
+        const c = V.reduce((m, p) => [m[0] + p[0] / 4, m[1] + p[1] / 4], [0, 0]), ca = Math.cos(th), sa = Math.sin(th);
+        let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+        for (const p of V) { const u = (p[0] - c[0]) * ca + (p[1] - c[1]) * sa, v = -(p[0] - c[0]) * sa + (p[1] - c[1]) * ca; u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v); }
+        let w = (u1 - u0) / 2, h = (v1 - v0) / 2; const cu = (u0 + u1) / 2, cv = (v0 + v1) / 2, cc = [c[0] + cu * ca - cv * sa, c[1] + cu * sa + cv * ca];
+        const square = Math.abs(w - h) < 0.12 * Math.max(w, h); if (square) w = h = (w + h) / 2;
+        const corners = [[-w, -h], [w, -h], [w, h], [-w, h]].map(([u, v]) => [cc[0] + u * ca - v * sa, cc[1] + u * sa + v * ca]);
+        return { type: square ? 'square' : 'rectangle', v: corners };
+      }
+    }
+    return { type: V.length === 3 ? 'triangle' : 'polygon', v: level(V, true) };
+  }
+
+  function points(sh, step) {
+    const out = [];
+    const line = (a, b, last) => { const k = Math.max(1, Math.ceil(H(b[0] - a[0], b[1] - a[1]) / step)); for (let i = 0; i < k + (last ? 1 : 0); i++) out.push([a[0] + (b[0] - a[0]) * i / k, a[1] + (b[1] - a[1]) * i / k]); };
+    if (sh.type === 'line') line(sh.a, sh.b, true);
+    else if (sh.type === 'polyline') { for (let i = 0; i + 1 < sh.v.length; i++) line(sh.v[i], sh.v[i + 1], i + 2 === sh.v.length); }
+    else if (sh.v) { for (let i = 0; i < sh.v.length; i++) line(sh.v[i], sh.v[(i + 1) % sh.v.length], false); out.push(sh.v[0].slice()); }
+    else if (sh.type === 'circle' || sh.type === 'ellipse') {
+      const a = sh.r || sh.a, b = sh.r || sh.b, ang = sh.ang || 0, k = Math.max(48, Math.min(240, Math.ceil(2 * PI * Math.max(a, b) / step)));
+      for (let i = 0; i <= k; i++) { const t = 2 * PI * i / k, u = a * Math.cos(t), v = b * Math.sin(t); out.push([sh.c[0] + u * Math.cos(ang) - v * Math.sin(ang), sh.c[1] + u * Math.sin(ang) + v * Math.cos(ang)]); }
+    } else if (sh.type === 'arc') {
+      const k = Math.max(12, Math.min(240, Math.ceil(Math.abs(sh.sweep) * sh.r / step)));
+      for (let i = 0; i <= k; i++) { const t = sh.a0 + sh.sweep * i / k; out.push([sh.c[0] + sh.r * Math.cos(t), sh.c[1] + sh.r * Math.sin(t)]); }
+    }
+    return out;
+  }
+  const center = sh => sh.c ? sh.c : sh.v ? sh.v.reduce((m, p) => [m[0] + p[0] / sh.v.length, m[1] + p[1] / sh.v.length], [0, 0]) : null;
+  function adjust(sh, anchor, pen, px = 1) {
+    if (sh.type === 'line') return { ...sh, b: snapAngle(sh.a, pen) };
+    if (sh.type === 'polyline') {
+      const v = sh.v.map(p => p.slice()), a = v[v.length - 2]; let b = pen.slice();
+      if (sh.orth) { if (Math.abs(b[0] - a[0]) > Math.abs(b[1] - a[1])) b[1] = a[1]; else b[0] = a[0]; }
+      v[v.length - 1] = b; return { ...sh, v };
+    }
+    const c = center(sh), d0 = H(anchor[0] - c[0], anchor[1] - c[1]);
+    if (d0 < 6 * px) return sh;
+    const k = Math.max(0.15, Math.min(6, H(pen[0] - c[0], pen[1] - c[1]) / d0));
+    const sc = p => [c[0] + (p[0] - c[0]) * k, c[1] + (p[1] - c[1]) * k];
+    if (sh.v) return { ...sh, v: sh.v.map(sc) };
+    if (sh.type === 'circle') return { ...sh, r: sh.r * k };
+    if (sh.type === 'ellipse') return { ...sh, a: sh.a * k, b: sh.b * k };
+    if (sh.type === 'arc') return { ...sh, r: sh.r * k };
+    return sh;
+  }
+  const NAMES = { line: 'Line', circle: 'Circle', ellipse: 'Ellipse', triangle: 'Triangle', rectangle: 'Rectangle', square: 'Square', polygon: 'Polygon', polyline: 'Lines', arc: 'Arc' };
+  return { recognize, points, adjust, NAMES };
+})();
+if (typeof module !== 'undefined') module.exports = { InkShape };
+
 /* ===== Live Math Notebook app ===== */
 (() => {
 'use strict';
@@ -2654,14 +2902,14 @@ function strokeNearLine(s, l) {
   return b.cy >= lb.y0 - 0.45 * h && b.cy <= lb.y1 + 0.45 * h && b.x0 <= lb.x1 + 2.2 * h && b.x1 >= lb.x0 - 1.2 * h;
 }
 function attachToLine(s) {
-  if (s.tool === 'hl') return;
+  if (s.tool === 'hl' || s.shape) return;
   for (const l of doc.lines) {
     if (l.ignored) continue;
     if (strokeNearLine(s, l)) { s.lineId = l.id; l.strokeIds.push(s.id); lineChanged(l); return; }
   }
 }
 function detectNewLines() {
-  const pool = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic; });
+  const pool = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic && !s.shape; });
   if (!pool.length) return [];
   const created = [];
   for (const pair of findEquals(pool)) {
@@ -2672,7 +2920,7 @@ function detectNewLines() {
     doc.lines.push(l);
     created.push(l);
   }
-  const rest = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic; });
+  const rest = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic && !s.shape; });
   for (const c of findColumns(rest)) created.push(newColumnLine(c));
   return created;
 }
@@ -5313,7 +5561,7 @@ let spaceDown = false, tapT = null, lastTap = null, lastPenEnd = null, liveRaf =
 const DRAW_TOOLS = new Set(['pen', 'pencil', 'hl']);
 const NO_INK = '.chip, .graph, #addPage, #quickSwitch, #pop, .edit-box';
 const INPUT_KEY = STORE_KEY + ':input';
-const inputPrefs = Object.assign({ pencilOnly: null, tapUndo: true, quickSwitch: true, penSeen: false },
+const inputPrefs = Object.assign({ pencilOnly: null, tapUndo: true, quickSwitch: true, penSeen: false, steady: 1, holdShapes: true, shapeHints: 0 },
   (() => { try { return JSON.parse(localStorage.getItem(INPUT_KEY) || '{}') || {}; } catch (e) { return {}; } })());
 function saveInputPrefs() { try { localStorage.setItem(INPUT_KEY, JSON.stringify(inputPrefs)); } catch (e) { } }
 let penSeen = !!inputPrefs.penSeen;
@@ -5431,7 +5679,9 @@ function startTool(e, wx, wy, tool = ui.tool, bridge = null) {
     const el = S('g'), tail = S('path');
     if (t === 'hl') el.setAttribute('opacity', '0.42'); else if (t === 'pencil') el.setAttribute('opacity', '0.9');
     el.appendChild(tail); (t === 'hl' ? gHL : gInk).appendChild(el);
-    gesture = { ...base, type: 'draw', s, el, tail, frozenTo: 0, raw: bridge ? [bridge.slice()] : [], pr: bridge ? bridge[2] : null, last: null, vel: 0, pred: null };
+    const st = STEADY[inputPrefs.steady] || STEADY[0];
+    gesture = { ...base, type: 'draw', s, el, tail, frozenTo: 0, raw: bridge ? [bridge.slice()] : [], pr: bridge ? bridge[2] : null, last: null, vel: 0, pred: null,
+      lazyR: st.lazy / view.s, sigma: st.sigma, lz: null, pen: null, hold: null, shape: null };
     addDrawPoint(e);
   } else if (t === 'eraser') {
     gesture = { ...base, type: 'erase', hit: new Set(), last: [wx, wy] };
@@ -5463,9 +5713,25 @@ function addDrawPoint(e) {
     const x = (ce.clientX - r.left - view.tx) / view.s, y = (ce.clientY - r.top - view.ty) / view.s;
     if (g.sx != null) g.maxD = Math.max(g.maxD, Math.abs(ce.clientX - g.sx) + Math.abs(ce.clientY - g.sy));
     const p = inkPressure(g, ce);
+    g.pen = [x, y, p];
+    holdTrack(g, ce.clientX, ce.clientY);
+    if (g.shape) continue;   // after a shape snapped, the pencil resizes it (below)
+    // steady ink: the ink follows a point pulled along behind the tip, so small tremors never reach the page
+    let q = g.pen;
+    if (g.lazyR > 0) {
+      if (!g.lz) g.lz = [x, y];
+      else { const dx = x - g.lz[0], dy = y - g.lz[1], d = Math.hypot(dx, dy); if (d > g.lazyR) { g.lz[0] += dx * (d - g.lazyR) / d; g.lz[1] += dy * (d - g.lazyR) / d; } }
+      q = g.lz;
+    }
     const lp = raw[raw.length - 1];
-    if (lp && Math.hypot(x - lp[0], y - lp[1]) < minD) { lp[2] = p; continue; }
-    raw.push([x, y, p]);
+    if (lp && Math.hypot(q[0] - lp[0], q[1] - lp[1]) < minD) { lp[2] = p; continue; }
+    raw.push([q[0], q[1], p]);
+  }
+  if (g.shape) {
+    g.shapeNow = InkShape.adjust(g.shape, g.anchor, g.pen, 1 / view.s);
+    g.shapePts = shapeInk(g.shapeNow, g.shapeP);
+    if (!liveRaf) liveRaf = requestAnimationFrame(paintLive);
+    return;
   }
   // draw slightly ahead of the pencil tip (iPadOS predicts the next sample) to cut the lag
   g.pred = null;
@@ -5482,14 +5748,17 @@ const LIVE_CHUNK = 96;
 function paintLive() {
   liveRaf = 0;
   const g = gesture; if (!g || g.type !== 'draw' || !g.raw.length) return;
-  const sm = smoothPts(g.raw), st = { tool: g.s.tool, color: g.s.color, w: g.s.w };
+  const st = { tool: g.s.tool, color: g.s.color, w: g.s.w };
+  if (g.shape) { styleStrokeEl(g.tail, { ...st, pts: g.shapePts }); g.tail.removeAttribute('opacity'); return; }
+  const sm = smoothPts(g.raw);
   while (sm.length - g.frozenTo > LIVE_CHUNK + 12) {   // points this far behind the tip no longer change
     const a = Math.max(0, g.frozenTo - 4), b = g.frozenTo + LIVE_CHUNK;
     const p = S('path'); styleStrokeEl(p, { ...st, pts: sm.slice(a, b + 1) }); p.removeAttribute('opacity');
     g.el.insertBefore(p, g.tail); g.frozenTo = b;
   }
   const tip = sm.slice(Math.max(0, g.frozenTo - 4));
-  if (g.pred) tip.push(g.pred);
+  if (g.lazyR > 0 && g.pen) tip.push(g.pen);   // with steady ink, a short straight piece joins the ink to the tip
+  else if (g.pred) tip.push(g.pred);
   styleStrokeEl(g.tail, { ...st, pts: tip }); g.tail.removeAttribute('opacity');
 }
 // symmetric smoothing: removes jitter without the lag that makes stroke ends fall short
@@ -5504,12 +5773,30 @@ function smoothPts(raw) {
   }
   return out;
 }
-function finalizePts(raw) {
-  const sm = smoothPts(raw), minD = 0.8 / view.s, out = [];
+function steadyPts(raw, sigmaPx) {
+  const step = 1 / view.s, P = [[raw[0][0], raw[0][1], raw[0][2]]];
+  let carry = 0;
+  for (let i = 1; i < raw.length; i++) {   // even spacing along the stroke (1 screen pixel), pressure carried along
+    const a = raw[i - 1], b = raw[i], seg = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    let t = step - carry;
+    while (t <= seg) { const k = t / seg; P.push([a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k]); t += step; }
+    carry = seg - (t - step);
+  }
+  const last = raw[raw.length - 1]; P.push(last.slice());
+  const n = P.length, sg = sigmaPx, R = Math.ceil(3 * sg), W = []; for (let k = -R; k <= R; k++) W.push(Math.exp(-k * k / (2 * sg * sg)));
+  return P.map((p, i) => {
+    const r = Math.min(R, i, n - 1 - i); if (r < 1) return p;   // symmetric window: the ends stay where they were drawn
+    let x = 0, y = 0, w = 0; for (let k = -r; k <= r; k++) { const q = P[i + k], c = W[k + R]; x += q[0] * c; y += q[1] * c; w += c; }
+    return [x / w, y / w, p[2]];
+  });
+}
+function finalizePts(raw, sigmaPx = 0) {
+  // a steadied stroke is smooth, so points ~2 px apart describe it fully (and keep rounding from adding wiggle)
+  const steady = sigmaPx > 0 && raw.length > 4, sm = steady ? steadyPts(raw, sigmaPx) : smoothPts(raw), minD = (steady ? 2 : 0.8) / view.s, out = [];
   for (let i = 0; i < sm.length; i++) {
     const p = sm[i], q = out[out.length - 1];
     if (q && i < sm.length - 1 && Math.hypot(p[0] - q[0], p[1] - q[1]) < minD) continue;
-    out.push([r1(p[0]), r1(p[1]), r2(p[2])]);
+    out.push(steady ? [r2(p[0]), r2(p[1]), r2(p[2])] : [r1(p[0]), r1(p[1]), r2(p[2])]);
   }
   return out;
 }
@@ -5619,10 +5906,15 @@ function finishGesture(g, e, cancelled) {
 let pendingDot = null, lockTap = null;
 function commitDraw(g, cancelled) {
   if (liveRaf) { cancelAnimationFrame(liveRaf); liveRaf = 0; }
+  if (g.hold) clearTimeout(g.hold.timer);
   g.el.remove();
   if (!g.raw.length) return;
   const s = g.s;
-  s.pts = finalizePts(g.raw);
+  if (g.shape && !cancelled) { s.pts = g.shapePts.map(p => [r1(p[0]), r1(p[1]), r2(p[2])]); s.shape = g.shapeNow.type; }
+  else {
+    if (g.lazyR > 0 && g.pen) { const lp = g.raw[g.raw.length - 1]; if (Math.hypot(g.pen[0] - lp[0], g.pen[1] - lp[1]) > 0.3 / view.s) g.raw.push(g.pen.slice()); }
+    s.pts = finalizePts(g.raw, g.sigma);
+  }
   if (g.pointerType === 'pen') { const lp = s.pts[s.pts.length - 1]; lastPenEnd = { t: performance.now(), x: lp[0], y: lp[1], p: lp[2], cancelled }; }
   lastInkAt = performance.now();
   if (!cancelled && g.maxD < 8 && performance.now() - g.t0 < 320) {
@@ -5638,6 +5930,34 @@ function commitDraw(g, cancelled) {
   }
   flushPendingDot();
   storeStroke(s);
+}
+/* ---------- draw and hold: the stroke becomes a clean shape (like GoodNotes) ----------
+   Hold the pencil still at the end of a line, circle, rectangle, triangle… for half a second: it snaps.
+   Keep holding and move: a line's end follows, other shapes grow or shrink about their centre. Lift to keep it. */
+const HOLD_MS = 500, HOLD_PX = 5;
+// steady ink: how far the ink trails the tip (screen px) and how much the finished stroke is evened out
+const STEADY = [{ name: 'Off', lazy: 0, sigma: 0 }, { name: 'Low', lazy: 1.5, sigma: 1.2 }, { name: 'Medium', lazy: 3.5, sigma: 2.5 }, { name: 'High', lazy: 7, sigma: 4.5 }];
+function holdTrack(g, cx, cy) {
+  if (g.shape || !inputPrefs.holdShapes) return;
+  const h = g.hold;
+  if (h && Math.hypot(cx - h.x, cy - h.y) <= HOLD_PX) return;
+  if (h) clearTimeout(h.timer);
+  g.hold = { x: cx, y: cy, timer: setTimeout(() => holdFired(g), HOLD_MS) };
+}
+function shapeInk(sh, p) { return InkShape.points(sh, 2.5 / view.s).map(q => [q[0], q[1], p]); }
+function holdFired(g) {
+  if (gesture !== g || g.shape || g.raw.length < 4) return;
+  const pts = g.raw.map(p => [p[0], p[1]]); if (g.pen) pts.push([g.pen[0], g.pen[1]]);
+  let sh = null; try { sh = InkShape.recognize(pts, 1 / view.s); } catch (e) { sh = null; }
+  if (!sh) return;
+  const ps = g.raw.map(p => p[2]).sort((a, b) => a - b);
+  g.shape = sh; g.shapeNow = sh; g.anchor = g.pen ? [g.pen[0], g.pen[1]] : pts[pts.length - 1]; g.shapeP = ps[ps.length >> 1] || 0.62;
+  g.shapePts = shapeInk(sh, g.shapeP);
+  while (g.el.firstChild !== g.tail) g.el.removeChild(g.el.firstChild);   // the shaky pieces go, the clean shape takes their place
+  g.frozenTo = 0;
+  paintLive();
+  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.lmnHaptic) { try { window.webkit.messageHandlers.lmnHaptic.postMessage({ x: g.hold.x, y: g.hold.y }); } catch (e) { } }
+  if (inputPrefs.shapeHints < 3) { inputPrefs.shapeHints++; saveInputPrefs(); flash(`${InkShape.NAMES[sh.type]} · keep holding and move to resize`); }
 }
 function storeStroke(s) {
   transact(() => { addStroke(s); attachToLine(s); });
@@ -5936,6 +6256,7 @@ function renderSwatches() {
   const ws = WIDTHS[t];
   wd.innerHTML = ws ? ws.map((w, i) => `<button class="wd" data-w="${i}" aria-label="${['Thin', 'Medium', 'Thick'][i]}" aria-pressed="${ui.width[t] === i}"><span style="--d:${4 + i * 4}px"></span></button>`).join('') : '';
   sw.hidden = !cols; wd.hidden = !ws;
+  const pb = $('#penBtn'); if (pb) pb.hidden = !DRAW_TOOLS.has(t);
 }
 $('#swatches').addEventListener('click', e => { const b = e.target.closest('.sw'); if (!b) return; ui.color[ui.tool] = b.dataset.c; renderSwatches(); });
 $('#widths').addEventListener('click', e => { const b = e.target.closest('.wd'); if (!b) return; ui.width[ui.tool] = Number(b.dataset.w); renderSwatches(); });
@@ -5949,8 +6270,18 @@ function toggleMenu(btn, menu) {
   menu.hidden = !open; btn.setAttribute('aria-expanded', String(open));
 }
 $('#paperBtn').onclick = e => { e.stopPropagation(); toggleMenu($('#paperBtn'), $('#paperMenu')); };
+function markPenMenu() {
+  document.querySelectorAll('#penMenu [data-steady]').forEach(b => b.setAttribute('aria-checked', String(Number(b.dataset.steady) === inputPrefs.steady)));
+  const h = $('#penMenu [data-do="holdshapes"]'); if (h) h.setAttribute('aria-checked', String(!!inputPrefs.holdShapes));
+}
+$('#penBtn').onclick = e => { e.stopPropagation(); markPenMenu(); toggleMenu($('#penBtn'), $('#penMenu')); };
+$('#penMenu').addEventListener('click', e => {
+  const st = e.target.closest('[data-steady]');
+  if (st) { inputPrefs.steady = Number(st.dataset.steady); saveInputPrefs(); markPenMenu(); flash(`Steady ink: ${STEADY[inputPrefs.steady].name}`); return; }
+  if (e.target.closest('[data-do="holdshapes"]')) { inputPrefs.holdShapes = !inputPrefs.holdShapes; saveInputPrefs(); markPenMenu(); flash(inputPrefs.holdShapes ? 'Hold to make shapes: on' : 'Hold to make shapes: off'); }
+});
 $('#moreBtn').onclick = e => { e.stopPropagation(); toggleMenu($('#moreBtn'), $('#moreMenu')); };
-document.addEventListener('pointerdown', e => { if (!e.target.closest('.menu, #paperBtn, #moreBtn, #newBtn, #graphBtn, .more, #libFolderMenu')) closeMenus(); if (lmenu && e.target.closest('#bar, #sidebar, #home')) closeLineMenu(); });
+document.addEventListener('pointerdown', e => { if (!e.target.closest('.menu, #paperBtn, #moreBtn, #newBtn, #graphBtn, #penBtn, .more, #libFolderMenu')) closeMenus(); if (lmenu && e.target.closest('#bar, #sidebar, #home')) closeLineMenu(); });
 $('#paperMenu').addEventListener('click', e => { const all = e.target.closest('[data-tplall]'); if (all) { const p = doc.pageList[currentPage()]; setTemplate(p ? p.t : doc.template, true); closeMenus(); toast('Every page now uses this paper'); return; } const b = e.target.closest('[data-tpl]'); if (!b) return; setTemplate(b.dataset.tpl); closeMenus(); });
 function markPaperMenu() { const p = doc.pageList && doc.pageList[currentNb != null ? currentPage() : 0]; const t = p ? p.t : doc.template; document.querySelectorAll('[data-tpl]').forEach(b => b.setAttribute('aria-checked', String(b.dataset.tpl === t))); }
 $('#addPage').onclick = e => { e.stopPropagation(); openPageMenu(e.currentTarget, doc.pages); };
