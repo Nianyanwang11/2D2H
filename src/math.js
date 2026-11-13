@@ -467,11 +467,71 @@ const MathEngine = (() => {
   return { normalize, tokenize, parse, splitTop, freeVars, compile, derivative, simplify, pp, toText, fmt, simpson, roots, F };
 })();
 
+/* ===== Functions written on the page: f(x) = …, f(x, y) = …, g(t) = …, r(θ) = … =====
+   Once a function is defined, every other line can use it: "f(2) =", "f(1, 2) =", "z = f(x, y)", "y = f(x) + 1". */
+const FDEF_RE = /^\s*([a-zA-Z])\s*\(\s*([a-zA-Zθ](?:\s*,\s*[a-zA-Zθ]){0,2})\s*\)\s*=(.*)$/;
+function parseFnDef(raw) {
+  const m = MathEngine.normalize(raw || '').match(FDEF_RE); if (!m) return null;
+  const name = m[1], vars = m[2].split(',').map(s => s.trim()), body = m[3].trim();
+  if (!body || name === 'e' || vars.includes(name) || new Set(vars).size !== vars.length) return null;
+  return { name, vars, body };
+}
+// replace whole-variable tokens at once (so f(y, x) can swap them)
+function substVars(src, vars, repl) {
+  const s = MathEngine.normalize(src), toks = MathEngine.tokenize(s);
+  let out = '', last = 0;
+  for (const t of toks) { const k = t.type === 'var' ? vars.indexOf(t.name) : -1; if (k < 0) continue; out += s.slice(last, t.start) + '(' + repl[k] + ')'; last = t.end; }
+  return out + s.slice(last);
+}
+function expandFnCalls(src, fns, depth = 0) {
+  if (depth > 5) throw new Error('A function is defined in terms of itself');
+  const s = MathEngine.normalize(src);
+  let toks; try { toks = MathEngine.tokenize(s); } catch (e) { return s; }
+  let out = '', last = 0, changed = false;
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i], F = t.type === 'var' && fns[t.name], nx = toks[i + 1];
+    if (!F || !nx || nx.type !== 'op' || nx.v !== '(') continue;
+    let d = 0, j = i + 1;
+    for (; j < toks.length; j++) { const q = toks[j]; if (q.type === 'op' && q.v === '(') d++; else if (q.type === 'op' && q.v === ')' && --d === 0) break; }
+    if (j >= toks.length) continue;
+    const args = MathEngine.splitTop(s.slice(nx.end, toks[j].start), ',').map(a => a.trim());
+    if (args.some(a => !a)) continue;
+    if (args.length !== F.vars.length) throw new Error(`${t.name} takes ${F.vars.length} value${F.vars.length > 1 ? 's' : ''}: ${t.name}(${F.vars.join(', ')})`);
+    const body = substVars(F.body, F.vars, args.map(a => expandFnCalls(a, fns, depth + 1)));
+    out += s.slice(last, t.start) + '(' + expandFnCalls(body, fns, depth + 1) + ')';
+    last = toks[j].end; i = j; changed = true;
+  }
+  return changed ? out + s.slice(last) : s;
+}
+
 /* ===== Statement analysis: decides graph type / arithmetic / solve ===== */
-function analyzeStatement(rawExpr) {
+function analyzeStatement(rawExpr, fns) {
   const ME = MathEngine;
-  const src = ME.normalize(rawExpr);
+  const src0 = ME.normalize(rawExpr);
+  const def = parseFnDef(src0);
+  let src = src0;
+  try {
+    const others = {}; for (const k in fns || {}) if (!def || k !== def.name) others[k] = fns[k];
+    if (Object.keys(others).length) src = def ? src0.slice(0, src0.indexOf('=') + 1) + ' ' + expandFnCalls(def.body, others) : expandFnCalls(src0, others);
+  } catch (e) { return { src: src0, kind: 'error', error: e.message }; }
   const res = { src, kind: 'unknown' };
+  if (src !== src0) { res.expanded = true; res.orig = src0; }
+  // a definition in other letters is graphed in x (and y): f(t) = t² → y = x², shown as f(t) = t²
+  if (def && !(def.vars.length === 1 && def.vars[0] === 'x') && !(def.vars.length === 2 && def.vars[0] === 'x' && def.vars[1] === 'y')) {
+    const body = src.slice(src.indexOf('=') + 1);
+    try {
+      if (def.vars.length === 1 && def.name === 'r' && (def.vars[0] === 'θ' || def.vars[0] === 't')) return analyzeStatement('r = ' + body);
+      if (def.vars.length <= 2) {
+        const to = def.vars.length === 1 ? ['x'] : ['x', 'y'];
+        const out = analyzeStatement(`${def.name}(${to.join(', ')}) = ${substVars(body, def.vars, to)}`);
+        if (out.kind === 'function' || out.kind === 'surface') { out.name = `${def.name}(${def.vars.join(', ')})`; out.vmap = {}; to.forEach((v, i) => { out.vmap[v] = def.vars[i]; }); if (src !== src0) { out.expanded = true; out.orig = src0; } }
+        return out;
+      }
+      // three variables: can't be graphed, but other lines can use it (f(1, 2, 3) =)
+      const f = ME.parse(body), p = new Set(); for (const v of ME.freeVars(f)) if (!def.vars.includes(v)) p.add(v);
+      return { src, kind: 'define', name: `${def.name}(${def.vars.join(', ')})`, f, vars: def.vars, params: [...p] };
+    } catch (e) { return { src, kind: 'error', error: e.message }; }
+  }
   const RESERVED = new Set(['x', 'y', 'z', 'r', 't', 'θ']);
   const params = new Set();
   const addParams = (n, exclude) => { for (const v of ME.freeVars(n)) if (!exclude.includes(v)) params.add(v); };

@@ -4,10 +4,12 @@ A handwriting math notebook for iPad and Apple Pencil, made for calculus classes
 
 - Write math by hand. Lines with "=" are read, and every number gets a slider.
 - Made for Apple Pencil: **steady ink** takes the tremor out of shaky strokes (Off / Low / Medium / High), and **draw and hold** turns a line, circle, ellipse, rectangle, square, triangle, polygon or arc into a clean shape. Keep holding and move to resize it.
-- Sketch a curve on a 2D graph and it becomes the closest elementary function (y = x² − 2, y = 2 sin x, y = 2/x …).
+- Draw a table (a T-chart or a grid) and fill in x, y (or x, y, z) values: tap it for a graph of the points with the closest function as a faded grey curve (linear, quadratic, cubic, exponential, logarithmic, power, inverse, sine; surfaces for x, y, z), its R², and one tap to graph it as a function.
+- Define functions and use them: f(x, y) = x² + y², then f(1, 2) = or z = f(x, y). g(t) = … works too. Writing on a slant is read along its slant.
+- Sketch a curve on a 2D graph and it becomes the closest elementary function (y = x² − 2, y = 2 sin x, y = 2/x …). Draw and hold works on graphs too.
 - Draw on a 3D graph the way a textbook does. A circle becomes a sphere, z = ±√(r² − x² − y²). The app also knows cones, cylinders, paraboloids, hyperboloids, saddles, boxes and planes. Curves drawn along x and y become a surface z = f(x, y).
 - Multivariable tools work on any surface: partial derivatives, level curves, gradient field, tangent plane, double integrals.
-- Lock a graph to write over it. Pages, folders, PDF import and export.
+- Lock a graph to write over it. ⤢ size buttons for graphs and images. Pages, folders, PDF import and export (sharp at any zoom).
 
 ## Putting it on your iPad
 
@@ -24,7 +26,7 @@ It opens full screen with its own icon. After the first visit it works offline, 
 
 The native app adds what a web page can't do:
 
-- **Apple Pencil double-tap and squeeze** switch between pen and eraser, following Settings → Apple Pencil.
+- **Apple Pencil double-tap and squeeze** switch between pen and eraser (Safari and the Claude app can't receive double-tap; use the switch at the bottom-left there).
 - **Apple Pencil Pro** gives a small haptic tap when a drawn shape snaps.
 - **Scribble** is kept from turning your ink into typed text.
 - Exports open the **share sheet** (Save to Files, AirDrop, GoodNotes …).

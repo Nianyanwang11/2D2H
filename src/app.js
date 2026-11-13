@@ -204,6 +204,8 @@ function setTemplate(t, all) {
 /* ---------- view ---------- */
 function applyView() {
   world.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${view.s})`;
+  // while the page moves it's one fast layer; once it settles it's drawn again at the new zoom, sharp
+  world.classList.add('moving'); clearTimeout(applyView.m); applyView.m = setTimeout(() => world.classList.remove('moving'), 200);
   positionOverlays();
   updatePageUI();
   clearTimeout(applyView.t);
@@ -236,10 +238,21 @@ function lineCharH(l) {
   const hs = (l.clusters || []).map(c => clusterBB(c)).filter(b => b.h > b.w * 0.35).map(b => b.h).sort((a, b) => a - b);
   return hs.length ? hs[Math.floor(hs.length / 2)] : Math.max(20, lineBB(l).h * 0.7);
 }
+// functions defined on the page (f(x) = …, f(x, y) = …): other lines can use them
+let userFns = {}, userFnSig = '';
+function collectUserFns(lines) {
+  const fns = {};
+  for (const l of lines) { if (l.layout === 'table' || !l.expr) continue; const d = parseFnDef(l.expr); if (d) fns[d.name] = { vars: d.vars, body: d.body }; }
+  const sig = JSON.stringify(fns);
+  if (sig !== userFnSig) { userFns = fns; userFnSig = sig; }
+}
+const callsUserFn = expr => { for (const n in userFns) if (expr.includes(n + '(') || expr.includes(n + ' (')) return true; return false; };
 function anOf(l) {
+  if (l.layout === 'table') return tableAnalysis(l);
+  const key = l.expr && callsUserFn(l.expr) ? l.expr + '\u0000' + userFnSig : l.expr;
   const c = anCache.get(l.id);
-  if (c && c.expr === l.expr) return c.an;
-  const an = l.expr ? analyzeStatement(l.expr) : { kind: 'none' };
+  if (c && c.expr === key) return c.an;
+  const an = l.expr ? analyzeStatement(l.expr, userFns) : { kind: 'none' };
   try {
     const C = {};
     if (an.kind === 'function') { C.f = ME.compile(an.f); try { an.df = ME.derivative(an.f, 'x'); C.df = ME.compile(an.df); } catch (e) { an.df = null; } }
@@ -257,13 +270,14 @@ function anOf(l) {
     else if (an.kind === 'evaluate' || an.kind === 'value') C.lhs = ME.compile(an.lhs);
     else if (an.kind === 'check') { C.lhs = ME.compile(an.lhs); C.rhs = ME.compile(an.rhs); }
     else if (an.kind === 'assign') C.rhs = ME.compile(an.rhs);
+    else if (an.kind === 'define') C.f = ME.compile(an.f);
     an.c = C;
   } catch (e) { an.kind = 'error'; an.error = e.message; }
-  anCache.set(l.id, { expr: l.expr, an });
+  anCache.set(l.id, { expr: key, an });
   return an;
 }
-const GRAPHABLE = new Set(['function', 'polar', 'parametric', 'implicit', 'surface', 'curve3d', 'implicit3d', 'solid']);
-const GRAPH3D = new Set(['surface', 'curve3d', 'implicit3d', 'solid']);
+const GRAPHABLE = new Set(['function', 'polar', 'parametric', 'implicit', 'surface', 'curve3d', 'implicit3d', 'solid', 'data', 'data3d']);
+const GRAPH3D = new Set(['surface', 'curve3d', 'implicit3d', 'solid', 'data3d']);
 /* ---------- solids: sphere, cube, box, cylinder, cone (point up) and vcone (point down) ----------
    Spheres sit at the origin; the others stand on the xy-plane, centred on the z-axis. */
 const SOLID = {
@@ -424,6 +438,7 @@ function solidShort(an) { return `${SOLID[an.solid].name}&nbsp; ${solidRegionHTM
 function computeScope() {
   const S0 = {};
   const lines = doc.lines.filter(liveLine).slice().sort((a, b) => lineBB(a).cy - lineBB(b).cy || lineBB(a).x0 - lineBB(b).x0);
+  collectUserFns(lines);
   const names = new Set();
   for (const l of lines) { const an = anOf(l); (an.params || []).forEach(p => names.add(p)); }
   for (const n of names) S0[n] = doc.params[n] != null ? doc.params[n] : 1;
@@ -437,13 +452,30 @@ function computeScope() {
 }
 
 /* --- stroke clustering & "=" detection --- */
+/* a stroke's main direction, its length along it and thickness across it: a dash written on a slant is still a dash */
+const axisCache = new Map();
+function strokeAxis(s) {
+  const P = s.pts, key = P.length + ':' + P[0][0] + ':' + P[0][1], c = axisCache.get(s.id);
+  if (c && c.key === key) return c;
+  let mx = 0, my = 0; for (const p of P) { mx += p[0]; my += p[1]; } mx /= P.length; my /= P.length;
+  let sxx = 0, syy = 0, sxy = 0; for (const p of P) { const dx = p[0] - mx, dy = p[1] - my; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; }
+  const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy), ux = Math.cos(ang), uy = Math.sin(ang);
+  let t0 = Infinity, t1 = -Infinity, u0 = Infinity, u1 = -Infinity, len = 0;
+  for (let i = 0; i < P.length; i++) {
+    const dx = P[i][0] - mx, dy = P[i][1] - my, t = dx * ux + dy * uy, u = -dx * uy + dy * ux;
+    t0 = Math.min(t0, t); t1 = Math.max(t1, t); u0 = Math.min(u0, u); u1 = Math.max(u1, u);
+    if (i) len += Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]);
+  }
+  const tc = (t0 + t1) / 2, uc = (u0 + u1) / 2;
+  const out = { key, ang, L: t1 - t0, T: u1 - u0, len, cx: mx + tc * ux - uc * uy, cy: my + tc * uy + uc * ux };
+  axisCache.set(s.id, out); return out;
+}
 function isDash(s) {
-  if (s.tool === 'hl') return false;
-  const b = bbox(s);
-  if (b.w < 7) return false;
-  if (b.h > b.w * 0.38) return false;
-  let len = 0; for (let i = 1; i < s.pts.length; i++) len += Math.hypot(s.pts[i][0] - s.pts[i - 1][0], s.pts[i][1] - s.pts[i - 1][1]);
-  return len < b.w * 1.7;
+  if (s.tool === 'hl' || !s.pts.length) return false;
+  const a = strokeAxis(s);
+  if (a.L < 7 || Math.abs(a.ang) > 0.55) return false;   // up to ~30° off level
+  if (a.T > a.L * 0.38) return false;
+  return a.len < a.L * 1.7;
 }
 function findEquals(ids) {
   const dashes = ids.map(id => doc.strokes[id]).filter(s => s && isDash(s));
@@ -451,16 +483,47 @@ function findEquals(ids) {
   for (let i = 0; i < dashes.length; i++) for (let j = i + 1; j < dashes.length; j++) {
     const a = dashes[i], b = dashes[j];
     if (used.has(a.id) || used.has(b.id)) continue;
-    const A = bbox(a), B = bbox(b);
-    const ratio = A.w / B.w; if (ratio < 0.45 || ratio > 2.2) continue;
-    const ov = Math.min(A.x1, B.x1) - Math.max(A.x0, B.x0); if (ov < 0.5 * Math.min(A.w, B.w)) continue;
-    const dy = Math.abs(A.cy - B.cy), mw = Math.max(A.w, B.w); if (dy < 0.1 * mw || dy > 0.95 * mw) continue;
+    const A = strokeAxis(a), B = strokeAxis(b);
+    if (Math.abs(A.ang - B.ang) > 0.26) continue;   // the two bars run the same way
+    const th = (A.ang + B.ang) / 2, c = Math.cos(th), sn = Math.sin(th);
+    const ta = A.cx * c + A.cy * sn, ua = -A.cx * sn + A.cy * c, tb = B.cx * c + B.cy * sn, ub = -B.cx * sn + B.cy * c;
+    const ratio = A.L / B.L; if (ratio < 0.45 || ratio > 2.2) continue;
+    const ov = Math.min(ta + A.L / 2, tb + B.L / 2) - Math.max(ta - A.L / 2, tb - B.L / 2); if (ov < 0.5 * Math.min(A.L, B.L)) continue;
+    const dy = Math.abs(ua - ub), mw = Math.max(A.L, B.L); if (dy < 0.1 * mw || dy > 0.95 * mw) continue;
     used.add(a.id); used.add(b.id); pairs.push([a.id, b.id]);
   }
   return pairs;
 }
-function clusterize(ids) {
-  const items = ids.map(id => doc.strokes[id]).filter(Boolean).map(s => ({ id: s.id, b: bbox(s) })).sort((p, q) => p.b.x0 - q.b.x0);
+// the slant of the line an "=" sits on (0 when level)
+function eqAngle(pair) { const a = pair.map(id => strokeAxis(doc.strokes[id]).ang), m = (a[0] + a[1]) / 2; return Math.abs(m) < 0.035 ? 0 : m; }
+// boxes measured along a slanted line: each stroke turned level about o
+function slantBoxes(th, o) {
+  const cache = new Map(), c = Math.cos(th), sn = Math.sin(th);
+  return id => {
+    let b = cache.get(id); if (b) return b;
+    const s = doc.strokes[id]; if (!s) return null;
+    if (!th) b = bbox(s);
+    else {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const p of s.pts) { const dx = p[0] - o[0], dy = p[1] - o[1], X = o[0] + dx * c + dy * sn, Y = o[1] - dx * sn + dy * c; if (X < x0) x0 = X; if (X > x1) x1 = X; if (Y < y0) y0 = Y; if (Y > y1) y1 = Y; }
+      b = { x0, y0, x1, y1, w: x1 - x0, h: y1 - y0, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
+    }
+    cache.set(id, b); return b;
+  };
+}
+// the slant along the line's characters (Theil–Sen: the median slope between pairs of strokes)
+function inkSlant(ids, s0) {
+  const cs = ids.map(id => doc.strokes[id] && bbox(doc.strokes[id])).filter(b => b && b.h < 3 * s0);
+  if (cs.length < 6) return null;
+  const sl = [];
+  for (let i = 0; i < cs.length; i++) for (let j = i + 1; j < cs.length; j++) { const dx = cs[j].cx - cs[i].cx; if (Math.abs(dx) > 0.8 * s0) sl.push((cs[j].cy - cs[i].cy) / dx); }
+  if (sl.length < 6) return null;
+  sl.sort((a, b) => a - b);
+  return Math.atan(sl[sl.length >> 1]);
+}
+function clusterize(ids, th = 0) {
+  const box = slantBoxes(th, th ? [idsBB(ids).cx, idsBB(ids).cy] : [0, 0]);
+  const items = ids.map(id => doc.strokes[id]).filter(Boolean).map(s => ({ id: s.id, b: box(s.id) })).sort((p, q) => p.b.x0 - q.b.x0);
   const clusters = [];
   for (const it of items) {
     const c = clusters[clusters.length - 1];
@@ -473,8 +536,9 @@ function clusterize(ids) {
   }
   return clusters.map(c => ({ ids: c.ids, text: null }));
 }
-function buildLineFromEquals(pair, pool) {
-  const eqBB = idsBB(pair);
+function buildLineFromEquals(pair, pool, th = eqAngle(pair)) {
+  const E = idsBB(pair), box = slantBoxes(th, [E.cx, E.cy]);
+  const eqBB = unionBB(pair.map(box));
   const s = Math.max(eqBB.w * 1.05, 14);
   const band0 = eqBB.cy - 1.3 * s, band1 = eqBB.cy + 1.3 * s;
   const inLine = new Set(pair);
@@ -483,7 +547,7 @@ function buildLineFromEquals(pair, pool) {
     grew = false;
     for (const id of pool) {
       if (inLine.has(id)) continue;
-      const b = bbox(doc.strokes[id]);
+      const b = box(id); if (!b) continue;
       const inBand = b.cy >= band0 && b.cy <= band1;
       const near = b.x0 <= gb.x1 + 2.1 * s && b.x1 >= gb.x0 - 2.1 * s;
       if (inBand && near && b.h < 4 * s) { inLine.add(id); gb = unionBB([gb, b]); grew = true; }
@@ -492,13 +556,19 @@ function buildLineFromEquals(pair, pool) {
   // stacked pieces (fractions, dots) that overlap horizontally with members
   for (const id of pool) {
     if (inLine.has(id)) continue;
-    const b = bbox(doc.strokes[id]);
+    const b = box(id); if (!b) continue;
     const vgap = b.cy < gb.y0 ? gb.y0 - b.y1 : b.y0 - gb.y1;
     if (vgap > 0.7 * s) continue;
-    const overlaps = [...inLine].some(m => { const mb = bbox(doc.strokes[m]); const ov = Math.min(mb.x1, b.x1) - Math.max(mb.x0, b.x0); return ov > 0.5 * Math.min(mb.w || 1, b.w || 1); });
+    const overlaps = [...inLine].some(m => { const mb = box(m); const ov = Math.min(mb.x1, b.x1) - Math.max(mb.x0, b.x0); return ov > 0.5 * Math.min(mb.w || 1, b.w || 1); });
     if (overlaps) inLine.add(id);
   }
-  return [...inLine];
+  const ids = [...inLine];
+  // a long line: follow the slant of the writing itself, not only of the "=" (its bars are short)
+  if (arguments.length < 3) {
+    const ts = inkSlant(ids, s);
+    if (ts != null && Math.abs(ts - th) > 0.05 && Math.abs(ts) < 0.6) { const t2 = Math.abs(ts) < 0.035 ? 0 : ts; return Object.assign(buildLineFromEquals(pair, pool, t2), { ang: t2 }); }
+  }
+  return Object.assign(ids, { ang: th });
 }
 function rowsOf(ids) {
   const items = ids.map(id => ({ id, b: bbox(doc.strokes[id]) })).sort((p, q) => p.b.cy - q.b.cy);
@@ -513,7 +583,7 @@ function rowsOf(ids) {
 // Column arithmetic: rows of numbers stacked above a horizontal answer line
 function findColumns(pool) {
   const out = [], used = new Set();
-  const bars = pool.map(id => doc.strokes[id]).filter(s => s && isDash(s) && bbox(s).w >= 22).sort((a, b) => bbox(b).w - bbox(a).w);
+  const bars = pool.map(id => doc.strokes[id]).filter(s => s && isDash(s) && bbox(s).w >= 22 && Math.abs(strokeAxis(s).ang) < 0.3).sort((a, b) => bbox(b).w - bbox(a).w);
   for (const bar of bars) {
     if (used.has(bar.id)) continue;
     const B = bbox(bar);
@@ -557,6 +627,7 @@ function newColumnLine(c) {
   return l;
 }
 function strokeNearLine(s, l) {
+  if (l.layout === 'table') { const R = tableRegion(l), b = bbox(s); return b.cx >= R.x0 && b.cx <= R.x1 && b.cy >= R.y0 && b.cy <= R.y1; }
   if (l.layout === 'column') {
     const bar = doc.strokes[l.barId]; if (!bar) return false;
     const b = bbox(s), B = bbox(bar), h = lineCharH(l), lb = lineBB(l);
@@ -565,33 +636,225 @@ function strokeNearLine(s, l) {
     const above = b.cy < B.cy && b.cy > lb.y0 - 0.4 * h;
     return inX && (below || above);
   }
-  const b = bbox(s), lb = lineBB(l), h = lineCharH(l);
+  const h = lineCharH(l);
+  let b = bbox(s), lb = lineBB(l);
+  if (l.ang) { const box = slantBoxes(l.ang, [lb.cx, lb.cy]); b = box(s.id); lb = unionBB(l.strokeIds.map(box)); }
   return b.cy >= lb.y0 - 0.45 * h && b.cy <= lb.y1 + 0.45 * h && b.x0 <= lb.x1 + 2.2 * h && b.x1 >= lb.x0 - 1.2 * h;
 }
 function attachToLine(s) {
-  if (s.tool === 'hl' || s.shape) return;
+  if (s.tool === 'hl') return;
+  // a table takes everything written inside it (and new rules drawn on it)
+  if (!s.shape || TABLE_SHAPES.has(s.shape)) for (const l of doc.lines) {
+    if (l.ignored || l.layout !== 'table' || !strokeNearLine(s, l)) continue;
+    s.lineId = l.id; l.strokeIds.push(s.id); if (frameSegs(s).length) (l.frameIds = l.frameIds || []).push(s.id); lineChanged(l); return;
+  }
+  if (s.shape) return;
   for (const l of doc.lines) {
-    if (l.ignored) continue;
+    if (l.ignored || l.layout === 'table') continue;
     if (strokeNearLine(s, l)) { s.lineId = l.id; l.strokeIds.push(s.id); lineChanged(l); return; }
   }
 }
 function detectNewLines() {
-  const pool = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic && !s.shape; });
-  if (!pool.length) return [];
   const created = [];
+  // tables first: their rules and values aren't "=" lines or column sums
+  const tpool = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic && (!s.shape || TABLE_SHAPES.has(s.shape)); });
+  const T = findTables(tpool);
+  for (const t of T.tables) created.push(newTableLine(t));
+  const pool = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic && !s.shape && !T.frames.has(id); });
+  if (!pool.length) return created;
   for (const pair of findEquals(pool)) {
     if (pair.some(id => doc.strokes[id].lineId)) continue;
     const ids = buildLineFromEquals(pair, pool.filter(id => !doc.strokes[id].lineId));
-    const l = { id: uid(), strokeIds: ids, clusters: [], expr: '', status: 'new', dirty: true, ver: 1, colorIdx: null, anchors: [] };
+    const l = { id: uid(), strokeIds: [...ids], clusters: [], expr: '', status: 'new', dirty: true, ver: 1, colorIdx: null, anchors: [] };
+    if (ids.ang) l.ang = r4(ids.ang);
     ids.forEach(id => { doc.strokes[id].lineId = l.id; });
     doc.lines.push(l);
     created.push(l);
   }
-  const rest = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic && !s.shape; });
+  const rest = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic && !s.shape && !T.frames.has(id); });
   for (const c of findColumns(rest)) created.push(newColumnLine(c));
   return created;
 }
+/* ---------- tables: ruled by hand, read as variables, graphed as points with the closest function ----------
+   Draw a T-chart or a grid (by hand, or with draw-and-hold lines), write the values in it. The rules
+   are found here; the handwriting is read through Claude as columns (or rows) of numbers. */
+const TABLE_MIN = 45, TABLE_SHAPES = new Set(['line', 'rectangle', 'square', 'polyline']);
+const segCache = new Map();
+function frameSegs(s) {   // the straight, level or upright pieces of a stroke: a table's rules
+  if (!s || s.tool === 'hl' || s.noTable || !s.pts.length || (s.shape && !TABLE_SHAPES.has(s.shape))) return [];
+  const key = s.pts.length + ':' + s.pts[0][0] + ':' + s.pts[0][1], c = segCache.get(s.id);
+  if (c && c.key === key) return c.segs;
+  const b = bbox(s), segs = [];
+  if (Math.max(b.w, b.h) >= TABLE_MIN) {
+    let sh = null; try { sh = InkShape.recognize(s.pts.map(p => [p[0], p[1]]), 1); } catch (e) { sh = null; }
+    const raw = !sh ? [] : sh.type === 'line' ? [[sh.a, sh.b]] : (sh.type === 'rectangle' || sh.type === 'square') ? sh.v.map((p, i) => [p, sh.v[(i + 1) % 4]]) : sh.type === 'polyline' ? sh.v.slice(1).map((p, i) => [sh.v[i], p]) : [];
+    for (const [a, q] of raw) {
+      const dx = q[0] - a[0], dy = q[1] - a[1]; if (Math.hypot(dx, dy) < TABLE_MIN) continue;
+      const ang = Math.abs(Math.atan2(dy, dx));
+      if (ang < 0.3 || ang > Math.PI - 0.3) segs.push({ o: 'h', y: (a[1] + q[1]) / 2, x0: Math.min(a[0], q[0]), x1: Math.max(a[0], q[0]) });
+      else if (Math.abs(ang - Math.PI / 2) < 0.3) segs.push({ o: 'v', x: (a[0] + q[0]) / 2, y0: Math.min(a[1], q[1]), y1: Math.max(a[1], q[1]) });
+    }
+  }
+  segCache.set(s.id, { key, segs }); return segs;
+}
+const segsBB = segs => unionBB(segs.map(g => g.o === 'h' ? { x0: g.x0, x1: g.x1, y0: g.y, y1: g.y } : { x0: g.x, x1: g.x, y0: g.y0, y1: g.y1 }));
+// groups of rules that meet: a cross (+), a T, or a grid — not a lone corner (that's a pair of axes)
+function findTables(pool) {
+  const cand = []; for (const id of pool) { const sg = frameSegs(doc.strokes[id]); if (sg.length) cand.push({ id, segs: sg }); }
+  if (!cand.length) return { tables: [], frames: new Set() };
+  const tol = 14, meet = (p, q) => {
+    if (p.o === q.o) return p.o === 'h' ? Math.abs(p.y - q.y) < tol && p.x0 < q.x1 + tol && q.x0 < p.x1 + tol : Math.abs(p.x - q.x) < tol && p.y0 < q.y1 + tol && q.y0 < p.y1 + tol;
+    const h = p.o === 'h' ? p : q, v = p.o === 'h' ? q : p; return v.x > h.x0 - tol && v.x < h.x1 + tol && h.y > v.y0 - tol && h.y < v.y1 + tol;
+  };
+  const par = cand.map((_, i) => i), find = i => par[i] === i ? i : (par[i] = find(par[i]));
+  for (let i = 0; i < cand.length; i++) for (let j = i + 1; j < cand.length; j++) if (cand[i].segs.some(p => cand[j].segs.some(q => meet(p, q)))) par[find(i)] = find(j);
+  const groups = new Map(); cand.forEach((c, i) => { const r = find(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(c); });
+  const tables = [], frames = new Set();
+  for (const grp of groups.values()) {
+    const segs = grp.flatMap(c => c.segs), H = segs.filter(g => g.o === 'h'), V = segs.filter(g => g.o === 'v');
+    if (!H.length || !V.length) continue;
+    const m = 15, ruled = (H.length >= 2 && V.length >= 2) || H.some(h => V.some(v => meet(h, v) && ((v.x > h.x0 + m && v.x < h.x1 - m) || (h.y > v.y0 + m && h.y < v.y1 - m))));
+    if (!ruled) continue;
+    const ids = grp.map(c => c.id); ids.forEach(id => frames.add(id));
+    const fb = segsBB(segs);
+    const others = pool.filter(id => !frames.has(id) && !ids.includes(id) && !doc.strokes[id].shape);
+    const inner = others.filter(id => { const b = bbox(doc.strokes[id]); return b.cx > fb.x0 - 8 && b.cx < fb.x1 + 8 && b.cy > fb.y0 - 8 && b.cy < fb.y1 + 8; });
+    const hs = inner.map(id => bbox(doc.strokes[id]).h).sort((a, b) => a - b), hm = hs.length ? hs[hs.length >> 1] : 30;
+    const mg = clamp(1.3 * hm, 16, 60);
+    const content = others.filter(id => { const b = bbox(doc.strokes[id]); return b.cx > fb.x0 - mg && b.cx < fb.x1 + mg && b.cy > fb.y0 - mg && b.cy < fb.y1 + mg && b.h < fb.h + mg; });
+    if (content.length < 4) continue;
+    // values on both sides of a column rule and of a row rule
+    const vx = V.map(v => v.x), hy = H.map(h => h.y), cols = new Set(), rows = new Set();
+    for (const id of content) { const b = bbox(doc.strokes[id]); cols.add(vx.filter(x => x < b.cx).length); rows.add(hy.filter(y => y < b.cy).length); }
+    if (cols.size < 2 || rows.size < 2) continue;
+    tables.push({ frame: ids, content, charH: hm });
+  }
+  return { tables, frames };
+}
+function tableRegion(l) {
+  const fr = (l.frameIds || []).filter(id => doc.strokes[id]);
+  const fb = fr.length ? segsBB(fr.flatMap(id => frameSegs(doc.strokes[id]))) : lineBB(l), all = unionBB([fb, lineBB(l)]);
+  const h = l.charH || 30, m = clamp(1.3 * h, 16, 60);
+  return { x0: all.x0 - m, x1: all.x1 + m, y0: all.y0 - m, y1: all.y1 + m + 0.6 * h };
+}
+function newTableLine(t) {
+  const ids = [...t.frame, ...t.content];
+  const l = { id: uid(), layout: 'table', frameIds: t.frame.slice(), strokeIds: ids, clusters: [], expr: '', status: 'new', dirty: true, ver: 1, colorIdx: null, anchors: [], charH: Math.round(t.charH) };
+  ids.forEach(id => { doc.strokes[id].lineId = l.id; });
+  doc.lines.push(l);
+  return l;
+}
+// the reading said this isn't a table: let its ink go back to being ordinary writing
+function dissolveTable(l) {
+  for (const id of l.frameIds || []) { const s = doc.strokes[id]; if (s) s.noTable = true; }
+  for (const id of l.strokeIds) { const s = doc.strokes[id]; if (s && s.lineId === l.id) delete s.lineId; }
+  doc.lines = doc.lines.filter(x => x !== l);
+  for (const g of doc.graphs) g.lineIds = g.lineIds.filter(id => id !== l.id);
+}
+function tablePrompt() {
+  return `This image shows a handwritten TABLE of values from a student's math notebook: numbers written in cells separated by hand-drawn lines.
+Reply with only a JSON object: {"ok": boolean, "vars": [{"name": string, "values": (number|null)[]}]}
+- One entry in "vars" for each variable: a column, or a row if the table is laid out sideways (labels in the first column). In the order written: left to right, or top to bottom.
+- "name": the variable's label as written ("x", "y", "z", "t", "f(x)", "h (m)"); "" if there is no label.
+- "values": the numbers of that variable in order, every variable the same length; null for an empty or unreadable cell. Keep the numbers as written, with their signs and decimals; a fraction like 1/2 becomes 0.5.
+- "ok": false if this is not a table of numbers.
+Example, a table with header x | y and rows 0 1, 1 3, 2 5: {"ok":true,"vars":[{"name":"x","values":[0,1,2]},{"name":"y","values":[1,3,5]}]}`;
+}
+function toNum(v) {
+  if (typeof v === 'number') return isFinite(v) ? v : null;
+  if (typeof v !== 'string') return null;
+  const t = v.replace(/[−–—]/g, '-').replace(/\s+/g, '').replace(/,/g, '');
+  const fr = t.match(/^(-?\d*\.?\d+)\/(\d*\.?\d+)$/); if (fr) return +fr[2] ? +fr[1] / +fr[2] : null;
+  return /^[-+]?\d*\.?\d+$/.test(t) ? parseFloat(t) : null;
+}
+function setTable(l, vars) {
+  const n = Math.max(0, ...vars.map(v => v.values.length));
+  vars = vars.map(v => ({ name: String(v.name == null ? '' : v.name).trim().slice(0, 16), values: v.values.concat(Array(n - v.values.length).fill(null)) }));
+  l.table = { vars };
+  l.expr = 'table ' + vars.map(v => `${v.name}=[${v.values.map(x => x == null ? '' : x).join(',')}]`).join(';');
+  l.status = 'ok'; l.dirty = false; l.err = ''; l.anchors = []; l.clusters = [];
+  if (l.dim == null) l.dim = vars.some(v => /^z$/i.test(v.name)) ? 3 : 2;
+}
+function applyTableReading(l, res) {
+  const vars = res && res.ok !== false && Array.isArray(res.vars) ? res.vars.filter(v => v && typeof v === 'object').map(v => ({ name: v.name, values: (Array.isArray(v.values) ? v.values : []).map(toNum) })) : [];
+  if (!vars.some(v => v.values.some(x => x != null))) return false;
+  setTable(l, vars); return true;
+}
+const isNumVar = v => v.values.some(x => x != null && isFinite(x));
+const chooseFit = (fits, sel) => sel === 'none' ? null : (sel && fits.find(f => f.fam === sel)) || fits[0] || null;
+const seriesCol = (l, si) => GCOL[((l.colorIdx || 0) + si) % GCOL.length];
+function tableAnalysis(l) {
+  const key = 'T' + l.expr + '|' + l.dim + '|' + JSON.stringify(l.fitSel || {}), c = anCache.get(l.id);
+  if (c && c.expr === key) return c.an;
+  const vars = (l.table && l.table.vars) || [], num = vars.filter(isNumVar), sel = l.fitSel || {};
+  const an = { kind: 'data', vars, series: [], names: [], params: [] };
+  const named = n => num.find(v => v.name.toLowerCase() === n);
+  if (num.length >= 3 && l.dim === 3) {
+    let X = named('x'), Y = named('y'), Z = named('z');
+    if (!(X && Y && Z)) [X, Y, Z] = num;
+    const pts = []; for (let i = 0; i < X.values.length; i++) { const p = [X.values[i], Y.values[i], Z.values[i]]; if (p.every(v => v != null && isFinite(v))) pts.push(p); }
+    const fits = DataFit.fit3D(pts.map(p => p[0]), pts.map(p => p[1]), pts.map(p => p[2]));
+    an.kind = 'data3d'; an.names = [X.name || 'x', Y.name || 'y', Z.name || 'z'];
+    an.series.push({ name: an.names[2], pts, fits, fit: chooseFit(fits, sel[0]) });
+  } else if (num.length >= 2) {
+    const X = named('x') || named('t') || num[0];
+    an.names = [X.name || 'x'];
+    num.filter(v => v !== X).slice(0, 4).forEach((Y, si) => {
+      const pts = []; for (let i = 0; i < X.values.length; i++) { const a = X.values[i], b = Y.values[i]; if (a != null && b != null && isFinite(a) && isFinite(b)) pts.push([a, b]); }
+      const fits = DataFit.fit2D(pts.map(p => p[0]), pts.map(p => p[1]));
+      an.series.push({ name: Y.name || 'y', pts, fits, fit: chooseFit(fits, sel[si]) });
+    });
+  } else an.empty = true;
+  anCache.set(l.id, { expr: key, an });
+  return an;
+}
+function tableHTML(an) {
+  const vars = an.vars.slice(0, 5), n = Math.max(0, ...vars.map(v => v.values.length)), k = Math.min(n, 8);
+  return `<span class="lm-table"><table>${vars.map(v => `<tr><th>${esc(v.name || '?')}</th>${v.values.slice(0, k).map(x => `<td>${x == null ? '·' : ME.fmt(x)}</td>`).join('')}${n > k ? '<td class="more">…</td>' : ''}</tr>`).join('')}</table></span>`;
+}
+const fmtR2 = r => r >= 0.99995 ? '= 1' : r < 0 ? '< 0' : '= ' + r.toFixed(4);
+// a fit as math, in the table's own letters (t and h instead of x and y), "≈" unless it's exact
+function fitHTML(an, si, f) {
+  const nm = an.kind === 'data3d' ? { x: an.names[0], y: an.names[1], z: an.names[2] } : { x: an.names[0], y: an.series[si].name };
+  let h = exprHTML(f.expr).replace(/<i>([xyz])<\/i>/g, (m, k) => { const v = nm[k]; return v && v !== k && /^[a-zA-Zα-ωΑ-Ω]$/.test(v) && v !== 'e' ? `<i>${esc(v)}</i>` : m; });
+  h = h.replace(/\(−([\d.]+)\)·/g, '−$1');   // −1.03t², not (−1.03)·t²
+  if (f.r2 < 0.99999) h = h.replace(' = ', ' ≈ ');
+  return h;
+}
+function tableMenuHTML(l, an) {
+  if (an.empty) return '<p class="lm-note">Read as a table. To graph it, it needs at least two columns (or rows) of numbers.</p>';
+  let h = '';
+  if (an.vars.filter(isNumVar).length >= 3) h += `<div class="lm-seg" role="group" aria-label="Graph the table as"><button data-a="dim" data-d="2" aria-pressed="${l.dim !== 3}">2D: each against <i>${esc(an.names[0] || 'x')}</i></button><button data-a="dim" data-d="3" aria-pressed="${l.dim === 3}">3D: points (<i>x</i>, <i>y</i>, <i>z</i>)</button></div>`;
+  an.series.forEach((se, si) => {
+    h += `<div class="lm-sec">${an.series.length > 1 ? `<span class="sw" style="background:${seriesCol(l, si)}"></span>${esc(se.name)} · ` : ''}Closest function · ${se.pts.length} point${se.pts.length === 1 ? '' : 's'}</div>`;
+    if (!se.fits.length) { h += `<p class="lm-note">${an.kind === 'data3d' ? 'At least three points' : 'At least two points with different x'} are needed to fit a function.</p>`; return; }
+    h += `<div class="lm-fits">${se.fits.slice(0, 6).map((f, i) => `<button data-a="fit" data-s="${si}" data-f="${f.fam}" class="${se.fit === f ? 'on' : ''}"><small>${esc(f.name)}${i === 0 ? ' · best' : ''}</small><span>${fitHTML(an, si, f)}</span><em>R² ${fmtR2(f.r2)}</em></button>`).join('')}<button data-a="fit" data-s="${si}" data-f="none" class="${se.fit ? '' : 'on'}"><small>None</small><span>points only</span></button></div>`;
+  });
+  return h;
+}
+function openTableEdit(l) {
+  const lb = lineBB(l), box = document.createElement('form');
+  box.className = 'chip edit-box table-edit';
+  box.style.left = lb.x0 + 'px'; box.style.top = (lb.y1 + 10) + 'px';
+  const vars = (l.table && l.table.vars) || [{ name: 'x', values: [] }, { name: 'y', values: [] }];
+  box.innerHTML = `<label for="tblIn">The table, one variable per line</label><textarea id="tblIn" rows="${Math.max(2, Math.min(6, vars.length))}" autocomplete="off" spellcheck="false"></textarea><button class="c-act" type="submit">Use this</button><button class="c-btn" type="button" data-cancel>Cancel</button><div class="edit-help">Example: x: 0, 1, 2, 3 &nbsp;and&nbsp; y: 1, 3, 5, 7</div>`;
+  chipLayer.appendChild(box);
+  const inp = box.querySelector('textarea');
+  inp.value = vars.map(v => `${v.name || '?'}: ${v.values.map(x => x == null ? '' : ME.fmt(x).replace(/−/g, '-')).join(', ')}`).join('\n');
+  inp.focus();
+  box.addEventListener('pointerdown', e => e.stopPropagation());
+  box.querySelector('[data-cancel]').onclick = () => box.remove();
+  box.addEventListener('submit', ev => {
+    ev.preventDefault();
+    const out = inp.value.split('\n').map(t => t.trim()).filter(Boolean).map((t, i) => { const m = t.match(/^([^:=]*)[:=](.*)$/); const name = m ? m[1].trim() : ['x', 'y', 'z'][i] || ''; return { name, values: (m ? m[2] : t).split(/[,;\s]+/).filter(Boolean).map(toNum) }; });
+    if (!out.some(v => v.values.some(x => x != null))) return;
+    transact(() => setTable(l, out));
+    markFresh(l); box.remove(); refresh();
+  });
+}
+
 function cleanupLines() {
+  for (const l of doc.lines.slice()) if (l.layout === 'table' && !(l.frameIds || []).some(id => doc.strokes[id])) dissolveTable(l);
   const removed = doc.lines.filter(l => l.fitted ? !doc.graphs.some(g => g.id === l.gid) : l.virtual ? !doc.lines.some(s => s.id === l.src && (s.fitted || s.strokeIds.some(id => doc.strokes[id]))) : !l.strokeIds.some(id => doc.strokes[id]));
   if (!removed.length) return;
   const ids = new Set(removed.map(l => l.id));
@@ -689,9 +952,12 @@ function lineImage(l, clusters, hOverride) {
   const h = hOverride || lineCharH(l);
   const k = clamp(44 / h, 0.3, 4);
   const gapW = 0.5 * h;
-  const lb = lineBB(l);
+  // a line written on a slant is turned level first, so it reads like level writing
+  const th = l.layout ? 0 : (l.ang || 0), B0 = lineBB(l), o = [B0.cx, B0.cy], c0 = Math.cos(th), s0 = Math.sin(th);
+  const turn = p => th ? [o[0] + (p[0] - o[0]) * c0 + (p[1] - o[1]) * s0, o[1] - (p[0] - o[0]) * s0 + (p[1] - o[1]) * c0] : p;
+  const lb = th ? unionBB(l.strokeIds.map(slantBoxes(th, o))) : B0;
   let total = lb.w + gapW * (clusters.length - 1);
-  const kk = Math.min(k, 1800 / Math.max(1, total * 1));
+  const kk = Math.min(k, 1800 / Math.max(1, total * 1), 2400 / Math.max(1, lb.h));
   const pad = 24;
   const cv = document.createElement('canvas');
   cv.width = Math.ceil(total * kk + pad * 2); cv.height = Math.ceil(lb.h * kk + pad * 2);
@@ -703,8 +969,8 @@ function lineImage(l, clusters, hOverride) {
       const s = doc.strokes[id]; if (!s) continue;
       c.lineWidth = Math.max(2.4, s.w * kk * 0.9);
       c.beginPath();
-      s.pts.forEach((p, j) => { const X = (p[0] - lb.x0 + i * gapW) * kk + pad, Y = (p[1] - lb.y0) * kk + pad; j ? c.lineTo(X, Y) : c.moveTo(X, Y); });
-      if (s.pts.length === 1) c.lineTo((s.pts[0][0] - lb.x0 + i * gapW) * kk + pad + 0.5, (s.pts[0][1] - lb.y0) * kk + pad + 0.5);
+      s.pts.forEach((p0, j) => { const p = turn(p0), X = (p[0] - lb.x0 + i * gapW) * kk + pad, Y = (p[1] - lb.y0) * kk + pad; j ? c.lineTo(X, Y) : c.moveTo(X, Y); });
+      if (s.pts.length === 1) { const p = turn(s.pts[0]); c.lineTo((p[0] - lb.x0 + i * gapW) * kk + pad + 0.5, (p[1] - lb.y0) * kk + pad + 0.5); }
       c.stroke();
     }
   });
@@ -716,8 +982,10 @@ The ink is split into exactly ${n} separate clusters, spaced apart, left to righ
 Reply with only a JSON object: {"expr": string, "clusters": string[], "ok": boolean}
 - "clusters": exactly ${n} strings, one per ink cluster in left-to-right order: what is written in that cluster. Usually one symbol ("2", "x", "=", "+", "(", "θ"). A cluster may hold several symbols if they touch (e.g. "sin", "12") or are stacked (a fraction like "(x+1)/2").
 - "expr": the whole line as plain-text math: + - * / ^ ( ) with explicit * for multiplication; functions sin cos tan sec csc cot asin acos atan sinh cosh tanh ln log sqrt abs exp; constants pi and e; write θ as theta. Small raised symbols are exponents (x^2). Keep every number exactly as written. Keep a trailing "=" if nothing follows it. Two equations on one line separated by a comma stay comma-separated.
+- Function notation stays as written, with its name and variables: f(x) = x^2, f(x, y) = x^2 + y^2, g(t) = 3*t, f(1, 2) =, z = f(x, y). The comma between variables belongs to the function; it does not split the line.
 - "ok": false if the line is not math.
-Example, a line "y = 3x² − 1" in 7 clusters: {"expr":"y = 3*x^2 - 1","clusters":["y","=","3","x","2","-","1"],"ok":true}`;
+Example, a line "y = 3x² − 1" in 7 clusters: {"expr":"y = 3*x^2 - 1","clusters":["y","=","3","x","2","-","1"],"ok":true}
+Example, a line "f(x,y) = x² + y²" in 12 clusters: {"expr":"f(x, y) = x^2 + y^2","clusters":["f","(","x",",","y",")","=","x","2","+","y","2"],"ok":true}`;
 }
 function columnPrompt(rows, hasBelow) {
   return `This image shows handwritten COLUMN (vertical) arithmetic from a student's notebook: numbers written in exactly ${rows} rows stacked above a horizontal line, with an operator (+, −, ×, ÷) at the left of the lower row(s).${hasBelow ? ' Something is also written below the line (the student\'s answer).' : ''}
@@ -757,13 +1025,14 @@ async function readLine(id) {
   finally { if (inflight.get(id) && inflight.get(id).ctl === ctl) inflight.delete(id); }
 }
 async function readLineInner(id, l, ver, sampler, ctl) {
+  const tbl = l.layout === 'table';
   let parts = l.layout === 'column' ? columnParts(l) : null;
   if (l.layout === 'column' && (!parts || !parts.rows.length)) { delete l.layout; parts = null; }
-  const clusters = parts ? [{ ids: l.strokeIds.slice() }] : clusterize(l.strokeIds);
-  const blob = await lineImage(l, clusters, parts ? parts.rowH : 0);
+  const clusters = parts || tbl ? [{ ids: l.strokeIds.filter(id => doc.strokes[id]) }] : clusterize(l.strokeIds, l.ang || 0);
+  const blob = await lineImage(l, clusters, parts ? parts.rowH : tbl ? l.charH || 30 : 0);
   let res;
   try {
-    res = await sampler.json(parts ? columnPrompt(parts.rows.length, parts.below.length > 0) : readPrompt(clusters.length), { images: [blob], modelTier: 'quick', signal: ctl.signal });
+    res = await sampler.json(tbl ? tablePrompt() : parts ? columnPrompt(parts.rows.length, parts.below.length > 0) : readPrompt(clusters.length), { images: [blob], modelTier: 'quick', signal: ctl.signal });
   } catch (e) {
     const L = lineById(id); if (!L) return;
     const code = e && e.code;
@@ -777,6 +1046,12 @@ async function readLineInner(id, l, ver, sampler, ctl) {
   }
   const L = lineById(id); if (!L) return;
   if (L.ver !== ver) { if (!recQ.includes(id)) { L.status = 'pending'; scheduleIdle(150); } return; }
+  if (tbl) {
+    if (applyTableReading(L, res)) { markFresh(L); noteReadDone(true); maybeAutoGraph(L); }
+    else if (L.table) { L.status = 'ok'; L.dirty = false; noteReadDone(false); }   // keep the last good reading
+    else { dissolveTable(L); noteReadDone(true); }
+    refresh(); scheduleSave(); scheduleIdle(60); return;
+  }
   if (parts && res && res.ok !== false && (typeof res.expr === 'string' || Array.isArray(res.rows))) { applyColumnReading(L, res, parts); markFresh(L); noteReadDone(true); refresh(); scheduleSave(); return; }
   if (!res || typeof res.expr !== 'string' || res.ok === false || !res.expr.trim()) {
     L.clusters = parts ? [] : clusters; L.status = 'notmath'; L.dirty = false; L.expr = ''; noteReadDone(false); refresh(); scheduleSave(); return;
@@ -833,6 +1108,7 @@ const range = (a, b) => { const o = []; for (let i = a; i <= b; i++) o.push(i); 
 let idleT = null;
 function scheduleIdle(ms = 550) { clearTimeout(idleT); idleT = setTimeout(onIdle, ms); }
 function readDelay(l) {
+  if (l.layout === 'table') return 1500;
   if (l.layout === 'column') return 650;
   const pair = findEquals(l.strokeIds)[0];
   if (!pair) return 550;
@@ -1158,6 +1434,7 @@ chipLayer.addEventListener('click', e => {
   refresh();
 });
 function openEdit(l, chip) {
+  if (l.layout === 'table') { openTableEdit(l); return; }
   const lb = lineBB(l);
   const box = document.createElement('form');
   box.className = 'chip edit-box';
@@ -1173,7 +1450,7 @@ function openEdit(l, chip) {
     ev.preventDefault();
     const v = inp.value.trim(); if (!v) return;
     transact(() => {
-      const keep = l.clusters && l.clusters.length && l.clusters.some(c => c.text) ? l.clusters : clusterize(l.strokeIds);
+      const keep = l.clusters && l.clusters.length && l.clusters.some(c => c.text) ? l.clusters : clusterize(l.strokeIds, l.ang || 0);
       applyReading(l, v, keep);
     });
     markFresh(l); box.remove(); refresh();
@@ -1328,15 +1605,20 @@ function litRoles(expr) {
 }
 
 let lmenu = null;
-const KIND_LABEL = { solid: 'Solid', function: 'Function', polar: 'Polar curve', parametric: 'Parametric curve', implicit: 'Curve', surface: 'Surface', curve3d: '3D curve', implicit3d: '3D surface', evaluate: 'Calculation', value: 'Calculation', check: 'Check', solve: 'Equation', assign: 'Variable' };
+const KIND_LABEL = { solid: 'Solid', function: 'Function', polar: 'Polar curve', parametric: 'Parametric curve', implicit: 'Curve', surface: 'Surface', curve3d: '3D curve', implicit3d: '3D surface', evaluate: 'Calculation', value: 'Calculation', check: 'Check', solve: 'Equation', assign: 'Variable', define: 'Function of x, y, z', data: 'Table', data3d: 'Table (x, y, z)' };
+const fnNameHTML = name => esc(name).replace(/\(([^)]*)\)/, (m, a) => '(' + a.split(',').map(v => `<i>${v.trim()}</i>`).join(', ') + ')');
+const prettyText = t => esc(t).replace(/\*/g, '·').replace(/\^2\b/g, '²').replace(/\^3\b/g, '³').replace(/-/g, '−');
 function lineMathHTML(l, an) {
-  const show = n => ME.pp(n);
+  const show = n => ME.pp(n, an.vmap ? { varHtml: v => `<i>${esc(an.vmap[v] || v)}</i>` } : undefined);
+  if (an.kind === 'data' || an.kind === 'data3d') return tableHTML(an);
+  if (an.expanded && (an.kind === 'evaluate' || an.kind === 'value')) return `${prettyText(an.orig.split('=')[0].trim())} = <b>${ME.fmt(an.c.lhs(scope))}</b>`;
   switch (an.kind) {
-    case 'function': return `${an.name === 'y' ? '<i>y</i>' : an.name.replace('(x)', '(<i>x</i>)')} = ${show(an.f)}`;
+    case 'define': return `${fnNameHTML(an.name)} = ${show(an.f)}`;
+    case 'function': return `${an.name === 'y' ? '<i>y</i>' : fnNameHTML(an.name)} = ${show(an.f)}`;
     case 'polar': return `<i>r</i> = ${show(an.f)}`;
     case 'parametric': return `(${show(an.fx)}, ${show(an.fy)})`;
     case 'implicit': case 'implicit3d': return `${show(an.g.a)} = ${show(an.g.b)}`;
-    case 'surface': return `${an.name ? esc(an.name).replace(/\b([xy])\b/g, '<i>$1</i>') : '<i>z</i>'} = ${show(an.f)}`;
+    case 'surface': return `${an.name ? fnNameHTML(an.name) : '<i>z</i>'} = ${show(an.f)}`;
     case 'curve3d': return `(${show(an.fx)}, ${show(an.fy)}, ${show(an.fz)})`;
     case 'solid': return solidShort(an);
     case 'evaluate': case 'value': return `${show(an.lhs)} = <b>${ME.fmt(an.c.lhs(scope))}</b>`;
@@ -1345,7 +1627,7 @@ function lineMathHTML(l, an) {
     default: return esc(l.expr || '');
   }
 }
-function openLineMenu(l) { closePop(); if (lmenu) closeLineMenu(); lmenu = { l, tx: false, rows: [] }; renderLineMenu(); refresh(); }
+function openLineMenu(l, opt = {}) { closePop(); if (lmenu) closeLineMenu(); lmenu = { l, tx: false, rows: [], chip: opt.chip || null, series: opt.series || 0 }; renderLineMenu(); refresh(); }
 function closeLineMenu() { if (!lmenu) return; if (lmenu.tx) endTx(); lmenu = null; $('#lineMenu').hidden = true; refresh(); }
 function graphThumb(g) {
   const ge = graphEls.get(g.id); if (!ge || !ge.canvas.width) return '';
@@ -1360,7 +1642,8 @@ function renderLineMenu() {
   const l = lmenu.l;
   if (!lineById(l.id) || !loopState(l)) { closeLineMenu(); return; }
   const ok = loopState(l) === 'ok', an = ok ? anOf(l) : null;
-  let h = `<div class="lm-head"><span class="lm-kind">${l.fitted ? 'From your sketch' : an ? (KIND_LABEL[an.kind] || 'Math') : 'Not read'}</span><span class="lm-math">${an ? lineMathHTML(l, an) : (l.expr ? esc(l.expr) : '')}</span><button class="lm-x" data-a="close" aria-label="Close">×</button></div>`;
+  const isData = !!an && (an.kind === 'data' || an.kind === 'data3d');
+  let h = `<div class="lm-head"><span class="lm-kind">${l.fittedFrom ? 'Fit to your table' : l.fitted ? 'From your sketch' : an ? (KIND_LABEL[an.kind] || 'Math') : l.layout === 'table' ? 'Table · not read' : 'Not read'}</span><span class="lm-math">${an ? lineMathHTML(l, an) : (l.expr ? esc(l.expr) : '')}</span><button class="lm-x" data-a="close" aria-label="Close">×</button></div>`;
   lmenu.rows = [];
   if (!an) {
     const why = l.status === 'unavailable' ? 'Handwriting can only be read when this page is open in Claude.' : l.status === 'notmath' ? 'This doesn’t look like math.' : l.status === 'error' ? (l.err || 'Couldn’t read this line.') : 'This line hasn’t been read yet.';
@@ -1369,6 +1652,8 @@ function renderLineMenu() {
     const v = verdict(l); if (v) h += `<p class="lm-note ${v.ok ? 'ok' : 'bad'}">${v.ok ? '✓ ' : ''}${esc(v.full)}</p>`;
     const solid = an.kind === 'solid';
     if (solid) h += `<p class="lm-note lm-solid">${solidInfoHTML(l, an)}</p>`;
+    if (isData) h += tableMenuHTML(l, an);
+    if (an.kind === 'define') h += `<p class="lm-note">A function of three variables can't be drawn, but any line can use it: ${fnNameHTML(an.name.replace(/\(.*\)/, '(' + an.vars.map((v, i) => i + 1).join(', ') + ')'))} =</p>`;
     if (l.traces && !(l.traces.x && l.traces.y)) h += `<p class="lm-note">Now draw how <i>z</i> changes along <i>${l.traces.x ? 'y' : 'x'}</i> to finish the surface.</p>`;
     // sliders: every number written in the line, plus free variables
     const roles = solid ? new Map(SOLID[an.solid].p.map((p, i) => [i, p])) : litRoles(l.expr);
@@ -1394,7 +1679,7 @@ function renderLineMenu() {
     }
     if (GRAPHABLE.has(an.kind)) {
       const k = an.kind, btns = [];
-      if (['function', 'polar', 'parametric', 'implicit'].includes(k)) btns.push(['new2d', 'New 2D graph']);
+      if (['function', 'polar', 'parametric', 'implicit', 'data'].includes(k)) btns.push(['new2d', 'New 2D graph']);
       if (k === 'function' || GRAPH3D.has(k)) btns.push(['new3d', 'New 3D graph']);
       if (k === 'surface') btns.push(['contour', 'New contour map']);
       h += `<div class="lm-sec">Graph</div><div class="lm-btns">${btns.map(([a, t]) => `<button data-a="${a}">${t}</button>`).join('')}</div>`;
@@ -1405,7 +1690,7 @@ function renderLineMenu() {
         h += `<div class="lm-sub">Add to a graph on this notebook</div><div class="lm-graphs">`;
         for (const g of targets) {
           const inG = mine.includes(g), d3 = graphIs3D(g), first = g.lineIds.map(lineById).find(x => x && x.expr);
-          const desc = first ? esc((first.virtual ? first.expr : first.expr).slice(0, 30)) : '';
+          const desc = first ? (first.layout === 'table' ? 'Table' : esc(first.expr.slice(0, 30))) : '';
           h += `<button class="lm-g${inG ? ' in' : ''}" data-a="${inG ? 'remove' : 'add'}" data-g="${g.id}"><img alt="" src="${graphThumb(g)}"><span class="lm-gt"><b>Graph ${doc.graphs.indexOf(g) + 1}</b> · ${d3 ? '3D' : '2D'} · page ${Math.floor(g.y / (PAGE_H + PAGE_GAP)) + 1}<small>${desc}</small></span><em>${inG ? 'Added · remove' : (d3 && k === 'function' ? 'Add as z = f(x)' : 'Add')}</em></button>`;
         }
         h += `</div>`;
@@ -1413,6 +1698,7 @@ function renderLineMenu() {
     }
     h += solid && l.fitted ? `<div class="lm-foot">${solidFuncs(an.solid, solidVals(an)).key ? '<button data-a="fxalone" title="Open the curved function in a new 3D graph, with the partial derivatives, level curves and the other multivariable tools">Graph <i>z</i> = <i>f</i>(<i>x</i>, <i>y</i>) by itself</button>' : ''}<button data-a="removefit">Remove</button></div>`
       : l.traces ? `<div class="lm-foot"><button data-a="swapxy" title="Read the x trace as the y trace and the other way round">Swap <i>x</i> ↔ <i>y</i></button><button data-a="write">✎ Write on page</button><button data-a="removefit">Remove</button></div>`
+      : isData ? `<div class="lm-foot">${an.series.some(se => se.fit) ? `<button data-a="usefit" title="Add the fitted function to the graph in color, with sliders and the calculus tools">Graph the fit as a function</button><button data-a="writefit" title="Write the fitted function under the table">✎ Write fit on page</button>${an.kind === 'data' ? `<button data-a="resid" aria-pressed="${!!l.resid}" title="Show how far each point is from the fit">${l.resid ? 'Hide' : 'Show'} residuals</button>` : ''}` : ''}<button data-a="edit">✎ Fix reading</button><button data-a="ignore">Not a table</button></div>`
       : l.fitted ? `<div class="lm-foot"><button data-a="write">✎ Write on page</button>${l.sketch ? `<button data-a="sketch">${l.showSketch === true ? 'Hide sketch' : 'Show sketch'}</button>` : ''}<button data-a="removefit">Remove</button></div>`
       : `<div class="lm-foot"><button data-a="edit">✎ Fix reading</button><button data-a="ignore">Not math</button></div>`;
   }
@@ -1429,7 +1715,9 @@ function positionLineMenu() {
   if (!lmenu) return;
   const el = $('#lineMenu'), w = el.offsetWidth || 340, h = el.offsetHeight || 200;
   let sx0, sy0, sy1;
-  if (lmenu.l.fitted) {
+  const chipEl = lmenu.chip && graphEls.get(lmenu.chip.gid) && graphEls.get(lmenu.chip.gid).fits.querySelector(`.gfit[data-l="${lmenu.l.id}"][data-s="${lmenu.chip.s}"]`);
+  if (chipEl) { const rr = chipEl.getBoundingClientRect(); sx0 = rr.left; sy0 = rr.top; sy1 = rr.bottom; }
+  else if (lmenu.l.fitted) {
     const chip = document.querySelector(`.gfit[data-l="${lmenu.l.id}"]`), ge = graphEls.get(lmenu.l.gid);
     const rr = chip ? chip.getBoundingClientRect() : ge ? ge.el.getBoundingClientRect() : null; if (!rr) return;
     sx0 = rr.left; sy0 = rr.top; sy1 = rr.bottom;
@@ -1457,6 +1745,36 @@ $('#lineMenu').addEventListener('click', e => {
   if (a === 'close') { closeLineMenu(); return; }
   if (a === 'alt') { const alt = l.alts[Number(b.dataset.x)]; if (alt) { transact(() => { l.expr = alt.expr; l.fam = alt.fam; l.name = alt.name; fittedAnchors(l); }); refresh(); queueGraph(l.gid); setTimeout(renderLineMenu, 30); } return; }
   if (a === 'write') { closeLineMenu(); writeFitOnPage(l); return; }
+  if (a === 'fit') {   // picking the best one again goes back to "always the best" (it follows the table as it changes)
+    const si = Number(b.dataset.s), se = anOf(l).series[si], best = se && se.fits[0] && se.fits[0].fam === b.dataset.f;
+    transact(() => { const fs = Object.assign({}, l.fitSel); if (best) delete fs[si]; else fs[si] = b.dataset.f; l.fitSel = fs; l.ver = (l.ver || 0) + 1; });
+    refresh(); setTimeout(renderLineMenu, 30); return;
+  }
+  if (a === 'resid') { transact(() => { l.resid = !l.resid; l.ver = (l.ver || 0) + 1; }); refresh(); setTimeout(renderLineMenu, 30); return; }
+  if (a === 'dim') {
+    const d = Number(b.dataset.d); if ((l.dim === 3) === (d === 3)) return;
+    transact(() => {
+      l.dim = d; l.ver = (l.ver || 0) + 1; l.fitSel = {};
+      for (const g of doc.graphs) {
+        if (!g.lineIds.includes(l.id)) continue;
+        const mine = id => id === l.id || (lineById(id) || {}).fittedFrom === l.id;
+        if (g.lineIds.some(id => !mine(id))) { g.lineIds = g.lineIds.filter(id => !mine(id)); continue; }   // shared graph: the table leaves it
+        doc.lines = doc.lines.filter(x => x.fittedFrom !== l.id || x.gid !== g.id); g.lineIds = [l.id];   // its own graph turns 2D ⇄ 3D
+        g.view = null; g.cam = null; g.dataKey = null; g.is3d = false; if (d === 3) g.h = Math.max(g.h, 430);
+      }
+    });
+    refresh(); setTimeout(renderLineMenu, 30); return;
+  }
+  if (a === 'usefit') { closeLineMenu(); useTableFit(l); return; }
+  if (a === 'writefit') {
+    const an = anOf(l), se = an.series[lmenu.series || 0] && an.series[lmenu.series || 0].fit ? an.series[lmenu.series || 0] : an.series.find(x => x.fit);
+    if (!se) return;
+    closeLineMenu();
+    const lb = lineBB(l); let nl = null;
+    transact(() => { nl = writeLine(exprToHand(se.fit.expr), lb.x0, lb.y1 + 26, 30, 41 + l.id, INK[0]); applyReading(nl, se.fit.expr, nl.clusters); });
+    syncInk(); markFresh(nl); refresh(); flash('Written under the table: tap it for sliders');
+    return;
+  }
   if (a === 'sketch') { const on = l.showSketch !== true; sketchUntil.delete(l.id); transact(() => { l.showSketch = on; }); queueGraph(l.gid); refresh(); setTimeout(renderLineMenu, 30); return; }
   if (a === 'removefit') { closeLineMenu(); removeFit(l); return; }
   if (a === 'fxalone') {   // the solid's curved function as a surface of its own, where every multivariable tool works
@@ -1524,7 +1842,31 @@ const graphQueue = new Set();
 function queueGraph(id) { graphQueue.add(id); if (!queueGraph.raf) queueGraph.raf = requestAnimationFrame(() => { queueGraph.raf = 0; const ids = [...graphQueue]; graphQueue.clear(); ids.forEach(drawGraph); }); }
 function graphById(id) { return doc.graphs.find(g => g.id === id); }
 function nextColor() { const used = doc.lines.map(l => l.colorIdx).filter(v => v != null); for (let i = 0; i < GCOL.length; i++) if (!used.includes(i)) return i; return used.length % GCOL.length; }
+// a little room around the values; the axes come into view when 0 isn't far off
+function dataRange(vals) {
+  let lo = Math.min(...vals), hi = Math.max(...vals); const span = hi - lo || Math.max(1, Math.abs(lo));
+  let a = lo - 0.12 * span, b = hi + 0.12 * span;
+  if (lo >= 0 && lo <= span) a = Math.min(a, -0.06 * (b - Math.min(a, 0)));
+  if (hi <= 0 && -hi <= span) b = Math.max(b, 0.06 * (Math.max(b, 0) - a));
+  return [a, b];
+}
+function dataOf(g) { return g.lineIds.map(lineById).filter(l => l && l.layout === 'table' && liveLine(l) && !l.ignored).map(anOf).filter(an => (an.kind === 'data' || an.kind === 'data3d') && an.series.some(se => se.pts.length)); }
+function dataView(g) {
+  const dat = dataOf(g); if (!dat.length) return null;
+  const xs = [], ys = []; for (const an of dat) for (const se of an.series) for (const p of se.pts) { xs.push(p[0]); ys.push(p[1]); }
+  const [x0, x1] = dataRange(xs), [y0, y1] = dataRange(ys);
+  return { x0, x1, y0, y1 };
+}
+// a graph of a table follows the table as values are added, until you move or zoom it yourself
+function followData(g) {
+  const dat = dataOf(g); if (!dat.length) return;
+  const key = JSON.stringify(dat.map(an => an.series.map(se => se.pts)));
+  if (g.dataKey === key) return;
+  if (!g.dataKey || g.autoV === JSON.stringify(g.view)) { const v = dataView(g); if (v) g.view = v; }
+  g.dataKey = key; g.autoV = JSON.stringify(g.view);
+}
 function defaultView(g, w, h) {
+  const dv = dataView(g); if (dv) return dv;
   const lines = g.lineIds.map(lineById).filter(Boolean);
   const kinds = lines.map(l => anOf(l).kind);
   let xr = 5;
@@ -1586,6 +1928,14 @@ const TOOLS = [
   ['riem', 'Riemann', 'Show a Riemann sum'],
   ['anti', 'F(x)+C', 'Show an antiderivative F(x) + C']
 ];
+// the size buttons: easier than the corner on an iPad. The graph grows with its contents (same view)
+function resizeGraph(g, how) {
+  const maxW = PAGE_W - 48, w0 = g.w, h0 = g.h;
+  let k = how === 'w' ? maxW / w0 : how === '1' ? 1.2 : 1 / 1.2;
+  k = clamp(k, Math.max(240 / w0, 200 / h0), Math.min(maxW / w0, 1100 / h0));
+  g.w = Math.round(w0 * k); g.h = Math.round(h0 * k);
+  g.x = how === 'w' ? 24 : Math.round(clamp(g.x, 24, PAGE_W - 24 - g.w));
+}
 function ensureGraphEl(g) {
   const g0id = g.id;
   let ge = graphEls.get(g.id);
@@ -1598,7 +1948,7 @@ function ensureGraphEl(g) {
     <span class="gcalc" hidden role="group" aria-label="Multivariable calculus"><button class="gt" data-k="dx" title="Show the partial derivative ∂f/∂x as a surface" aria-pressed="false">∂f/∂x</button><button class="gt" data-k="dy" title="Show the partial derivative ∂f/∂y as a surface" aria-pressed="false">∂f/∂y</button><button class="gt" data-k="dir" title="Directional derivative at P: drag the arrow in the Level, Heat or ∇f view" aria-pressed="false">Dᵤf</button><button class="gt" data-k="vol" title="Double integral: volume under the surface over a region R" aria-pressed="false">∬ Volume</button><button class="gt" data-k="box" title="3D Riemann sum with n×n boxes" aria-pressed="false">Riemann</button><span class="gnb" hidden><button class="gt sm" data-nb="-1" aria-label="Fewer boxes">−</button><span class="gn gnbv"></span><button class="gt sm" data-nb="1" aria-label="More boxes">+</button></span></span>
     <span class="g3t" hidden><button class="gt" data-k="floor" title="Draw level curves on the floor" aria-pressed="false">Floor contours</button><button class="gt" data-k="tp" title="Show point P with its partial derivatives, gradient and tangent plane" aria-pressed="false">Point P</button></span>
     <span class="griem" hidden><button class="gt sm" data-n="-1" aria-label="Fewer rectangles">−</button><span class="gn"></span><button class="gt sm" data-n="1" aria-label="More rectangles">+</button><span class="gm">${['left', 'mid', 'right'].map(m => `<button class="gt sm" data-m="${m}" aria-pressed="false">${m[0].toUpperCase()}</button>`).join('')}</span></span>
-    <span class="gend"><span class="gd3" hidden role="group" aria-label="Draw in 3D"><button class="gt" data-d3="solid" title="Draw a solid: a circle becomes a sphere, a square or a box becomes a cube, an oval with sides becomes a cylinder or a cone" aria-pressed="false">◯ Shape</button><button class="gt" data-d3="trace" title="Draw traces: how z changes along x and along y, to build a surface z = f(x, y)" aria-pressed="false">∿ Traces</button></span><button class="gt gdraw" data-draw title="Draw a curve with the pencil and it becomes a function" aria-pressed="false">✎ Draw</button><button class="gt gclear" data-clear title="Remove the drawing: clears every sketched curve from this graph (undo brings it back)" hidden>Clear</button><button class="gt sm" data-reset title="Reset view" aria-label="Reset view">⟲</button><button class="gt sm gx" data-del title="Remove graph" aria-label="Remove graph">×</button></span></div>
+    <span class="gend"><span class="gd3" hidden role="group" aria-label="Draw in 3D"><button class="gt" data-d3="solid" title="Draw a solid: a circle becomes a sphere, a square or a box becomes a cube, an oval with sides becomes a cylinder or a cone" aria-pressed="false">◯ Shape</button><button class="gt" data-d3="trace" title="Draw traces: how z changes along x and along y, to build a surface z = f(x, y)" aria-pressed="false">∿ Traces</button></span><button class="gt gdraw" data-draw title="Draw a curve with the pencil and it becomes a function" aria-pressed="false">✎ Draw</button><button class="gt gclear" data-clear title="Remove the drawing: clears every sketched curve from this graph (undo brings it back)" hidden>Clear</button><button class="gt sm gsz" data-size title="Graph size: bigger, smaller, page width" aria-label="Graph size" aria-pressed="false">⤢</button><span class="gsize" hidden role="group" aria-label="Graph size"><button class="gt sm" data-gs="-1" aria-label="Smaller">−</button><button class="gt sm" data-gs="1" aria-label="Bigger">+</button><button class="gt" data-gs="w" title="As wide as the page">Page width</button></span><button class="gt sm" data-reset title="Reset view" aria-label="Reset view">⟲</button><button class="gt sm gx" data-del title="Remove graph" aria-label="Remove graph">×</button></span></div>
     <div class="gplot"><canvas></canvas><svg class="gsk" aria-hidden="true"><path/><path class="ghost"/></svg><div class="glegend"></div><div class="gfits"></div></div><div class="gresize" title="Drag to resize" aria-hidden="true"></div>
     <button class="glock" title="Locked: write on it. Double-tap or tap here to unlock" aria-label="Unlock graph"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="7" width="10" height="7" rx="1.2"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg></button>`;
   graphLayer.appendChild(el);
@@ -1608,7 +1958,7 @@ function ensureGraphEl(g) {
   ge.legend.addEventListener('click', () => { const g = graphById(g0id); if (!g) return; g.legendMin = !g.legendMin; ge.legend.classList.toggle('min', g.legendMin); scheduleSave(); });
   ge.fits = el.querySelector('.gfits'); ge.skPath = el.querySelector('.gsk path'); ge.ghostPath = el.querySelector('.gsk path.ghost'); ge.pending = [];
   ge.fits.addEventListener('pointerdown', e => e.stopPropagation());
-  ge.fits.addEventListener('click', e => { const b = e.target.closest('.gfit'); if (!b) return; const l = lineById(Number(b.dataset.l)); if (l) { if (lmenu && lmenu.l === l) closeLineMenu(); else openLineMenu(l); } });
+  ge.fits.addEventListener('click', e => { const b = e.target.closest('.gfit'); if (!b) return; const l = lineById(Number(b.dataset.l)); if (l) { if (lmenu && lmenu.l === l) closeLineMenu(); else openLineMenu(l, b.dataset.s != null ? { chip: { gid: g0id, s: b.dataset.s }, series: Number(b.dataset.s) } : {}); } });
   graphEls.set(g.id, ge);
   wireGraph(g.id, ge);
   return ge;
@@ -1646,6 +1996,8 @@ function wireGraph(id, ge) {
     else if (b.dataset.m) transact(() => { g.method = b.dataset.m; });
     else if (b.dataset.z) zoomGraph(g, Number(b.dataset.z), 0.5, 0.5);
     else if (b.hasAttribute('data-clear')) { clearDrawing(g); return; }
+    else if (b.hasAttribute('data-size')) { const ge2 = graphEls.get(g.id); ge2.sizeOpen = !ge2.sizeOpen; updateGraphBar(g); return; }
+    else if (b.dataset.gs) { transact(() => resizeGraph(g, b.dataset.gs)); placeGraph(g); queueGraph(g.id); refresh(); return; }
     else if (b.hasAttribute('data-draw')) { transact(() => { g.drawOn = !g.drawOn; }); flash(g.drawOn ? 'Draw on: sketch a curve with the pencil' : 'Draw off: the pencil moves the graph'); }
     else if (b.dataset.d3) {
       const k = b.dataset.d3, off = g.drawOn && (g.draw3 || 'solid') === k;
@@ -1781,13 +2133,42 @@ function sketchStart(g, ge, e, [px, py]) {
   return true;
 }
 function sketchMove(g, ge, e) {
-  const cv = ge.canvas, r = cv.getBoundingClientRect(), W = cv.clientWidth, H = cv.clientHeight, k = W / (r.width || 1), v = g.view;
+  const cv = ge.canvas, r = cv.getBoundingClientRect(), W = cv.clientWidth, H = cv.clientHeight, k = W / (r.width || 1), v = g.view, sk = ge.sk;
+  if (sk.shape) {   // held into a clean shape: keep moving to resize it (a line's end follows the pencil)
+    sk.now = InkShape.adjust(sk.shape, sk.anchor, [(e.clientX - r.left) * k, (e.clientY - r.top) * k], 1);
+    sketchShapePts(g, ge, sk, sk.now); return;
+  }
+  sketchHoldTrack(g, ge, e);
   for (const ce of coalesced(e)) {
     const px = (ce.clientX - r.left) * k, py = (ce.clientY - r.top) * k;
     const last = ge.sk.pts[ge.sk.pts.length - 1];
     if (last && Math.hypot(px - last[2], py - last[3]) < 0.8) continue;
     ge.sk.pts.push([v.x0 + px / W * (v.x1 - v.x0), v.y1 - py / H * (v.y1 - v.y0), px, py]);
   }
+  if (!ge.skRaf) ge.skRaf = requestAnimationFrame(() => { ge.skRaf = 0; drawSketchOverlay(ge); });
+}
+// draw and hold on a graph too: the sketch snaps to a clean line, circle, ellipse… before it's matched to a function
+function sketchHoldTrack(g, ge, e) {
+  const sk = ge.sk; if (!sk || sk.shape || !inputPrefs.holdShapes) return;
+  const h = sk.hold;
+  if (h && Math.hypot(e.clientX - h.x, e.clientY - h.y) <= HOLD_PX) return;
+  if (h) clearTimeout(h.timer);
+  const gid = g.id;
+  sk.hold = { x: e.clientX, y: e.clientY, timer: setTimeout(() => sketchHoldFired(gid, ge, sk), HOLD_MS) };
+}
+function sketchHoldFired(gid, ge, sk) {
+  const g = graphById(gid); if (!g || ge.sk !== sk || sk.shape || sk.pts.length < 4) return;
+  let sh = null; try { sh = InkShape.recognize(sk.pts.map(p => [p[2], p[3]]), 1); } catch (e) { sh = null; }
+  if (!sh) return;
+  const last = sk.pts[sk.pts.length - 1];
+  sk.shape = sh; sk.now = sh; sk.anchor = [last[2], last[3]];
+  sketchShapePts(g, ge, sk, sh);
+  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.lmnHaptic) { try { window.webkit.messageHandlers.lmnHaptic.postMessage({ x: sk.hold.x, y: sk.hold.y }); } catch (e) { } }
+  if (inputPrefs.shapeHints < 3) { inputPrefs.shapeHints++; saveInputPrefs(); flash(`${InkShape.NAMES[sh.type]} · keep holding and move to resize`); }
+}
+function sketchShapePts(g, ge, sk, sh) {
+  const W = ge.canvas.clientWidth, H = ge.canvas.clientHeight, v = g.view;
+  sk.pts = InkShape.points(sh, 2).map(([px, py]) => [v.x0 + px / W * (v.x1 - v.x0), v.y1 - py / H * (v.y1 - v.y0), px, py]);
   if (!ge.skRaf) ge.skRaf = requestAnimationFrame(() => { ge.skRaf = 0; drawSketchOverlay(ge); });
 }
 function drawSketchOverlay(ge) {
@@ -1798,6 +2179,7 @@ function drawSketchOverlay(ge) {
 }
 function sketchEnd(g, ge, cancelled) {
   const sk = ge.sk; ge.sk = null;
+  if (sk && sk.hold) clearTimeout(sk.hold.timer);
   if (!g || !sk) return;
   if (!cancelled && sk.pts.length) ge.pending.push(sk.pts);
   drawSketchOverlay(ge);
@@ -1929,9 +2311,11 @@ function exprHTML(expr) { try { const an = analyzeStatement(expr); return lineMa
 // the recognized functions sit as small chips at the bottom-left of their graph
 function renderFits(g, ge) {
   const fl = g.lineIds.map(lineById).filter(l => l && l.fitted && liveLine(l));
-  const html = fl.map(l => `<button class="gfit${lmenu && lmenu.l === l ? ' on' : ''}" data-l="${l.id}" title="Options: sliders, other matches, write it on the page"><i style="background:${GCOL[(l.colorIdx || 0) % GCOL.length]}"></i><span class="gfit-m">${(() => { try { return lineMathHTML(l, anOf(l)); } catch (e) { return esc(l.expr); } })()}</span><span class="gfit-more">⌄</span></button>`).join('');
+  const dl = g.lineIds.map(lineById).filter(l => l && l.layout === 'table' && liveLine(l) && !l.ignored);
+  const dataChips = dl.map(l => { const an = anOf(l); return (an.series || []).map((se, si) => `<button class="gfit gdata${lmenu && lmenu.l === l ? ' on' : ''}" data-l="${l.id}" data-s="${si}" title="The closest function to the table: other fits, residuals, graph it as a function"><i style="background:${seriesCol(l, si)}"></i><span class="gfit-m">${se.fit ? fitHTML(an, si, se.fit) : '<span class="muted">points only</span>'}</span>${se.fit ? `<span class="gfit-r">R² ${fmtR2(se.fit.r2)}</span>` : ''}<span class="gfit-more">⌄</span></button>`).join(''); }).join('');
+  const html = dataChips + fl.map(l => `<button class="gfit${lmenu && lmenu.l === l ? ' on' : ''}" data-l="${l.id}" title="Options: sliders, other matches, write it on the page"><i style="background:${GCOL[(l.colorIdx || 0) % GCOL.length]}"></i><span class="gfit-m">${(() => { try { return lineMathHTML(l, anOf(l)); } catch (e) { return esc(l.expr); } })()}</span><span class="gfit-more">⌄</span></button>`).join('');
   if (ge.fits.dataset.h !== html) { ge.fits.innerHTML = html; ge.fits.dataset.h = html; }
-  ge.fits.hidden = !fl.length;
+  ge.fits.hidden = !html;
 }
 // where a line "is" on the page (fitted functions live on their graph)
 function lineAnchorBox(l) {
@@ -1965,6 +2349,23 @@ function writeFitOnPage(l) {
   });
   syncInk(); markFresh(nl); refresh();
   flash('Written on the page: tap it for sliders');
+}
+// the table's fit becomes a real function on its graphs: colored, with sliders and the calculus tools
+function useTableFit(l) {
+  const an = anOf(l); let gs = doc.graphs.filter(g => g.lineIds.includes(l.id)), made = null;
+  transact(() => {
+    if (!gs.length) { made = createGraphFor(l); gs = [made]; }
+    for (const g of gs) an.series.forEach((se, si) => {
+      if (!se.fit) return;
+      const old = g.lineIds.map(lineById).find(x => x && x.fittedFrom === l.id && x.series === si);
+      if (old) { old.expr = se.fit.expr; old.name = se.fit.name; old.ver = (old.ver || 0) + 1; fittedAnchors(old); return; }
+      const nl = { id: uid(), fitted: true, gid: g.id, fittedFrom: l.id, series: si, expr: se.fit.expr, name: se.fit.name, alts: [], strokeIds: [], clusters: [], status: 'ok', dirty: false, ver: 1, colorIdx: ((l.colorIdx || 0) + si) % GCOL.length, anchors: [] };
+      fittedAnchors(nl); doc.lines.push(nl); g.lineIds.push(nl.id);
+    });
+  });
+  refresh();
+  const g0 = made || gs[0]; if (g0) setTimeout(() => revealGraph(g0), 60);
+  flash('The fit is a function on the graph now: tap its chip for sliders');
 }
 function removeFit(l) {
   transact(() => {
@@ -2233,7 +2634,7 @@ function updateGraphBar(g) {
   const ge = ensureGraphEl(g);
   const lines = g.lineIds.map(lineById).filter(Boolean);
   const kinds = [...new Set(lines.filter(liveLine).map(l => anOf(l).kind))];
-  const NAMES = { function: 'f(x)', polar: 'Polar', parametric: 'Parametric', implicit: 'Curve', surface: 'z = f(x, y)', curve3d: '3D curve', implicit3d: '3D surface', solid: 'Solid' };
+  const NAMES = { function: 'f(x)', polar: 'Polar', parametric: 'Parametric', implicit: 'Curve', surface: 'z = f(x, y)', curve3d: '3D curve', implicit3d: '3D surface', solid: 'Solid', data: 'Table', data3d: 'Table (x, y, z)' };
   ge.el.querySelector('.gtype').textContent = kinds.map(k => NAMES[k] || k).join(' + ') || (g.is3d ? '3D graph' : 'Graph');
   const d3 = graphIs3D(g), surf = d3 && primarySurface(g);
   const hasF = !d3 && !!primaryFn(g);
@@ -2251,6 +2652,7 @@ function updateGraphBar(g) {
   const gc = ge.el.querySelector('.gcalc'); gc.hidden = !surf;
   gc.querySelectorAll('.gt[data-k]').forEach(b => b.setAttribute('aria-pressed', String(!!g.show[b.dataset.k])));
   gc.querySelector('.gnb').hidden = !g.show.box; gc.querySelector('.gnbv').textContent = `${g.nb || 4}×${g.nb || 4}`;
+  ge.el.querySelector('.gsize').hidden = !ge.sizeOpen; ge.el.querySelector('.gsz').setAttribute('aria-pressed', String(!!ge.sizeOpen));
   ge.el.classList.toggle('is3d', d3);
   ge.el.querySelectorAll('.gtools .gt').forEach(b => b.setAttribute('aria-pressed', String(!!g.show[b.dataset.k])));
   const rm = ge.el.querySelector('.griem'); rm.hidden = !(hasF && g.show.riem);
@@ -2271,7 +2673,7 @@ function drawGraph(id) {
   const cv = ge.canvas;
   const W = cv.clientWidth, H = cv.clientHeight;
   if (!W || !H) return;
-  const dpr = Math.min(3, (window.devicePixelRatio || 1) * Math.max(1, view.s));
+  const dpr = clamp((window.devicePixelRatio || 1) * Math.max(1, view.s), 2, 3);
   const cw = Math.round(W * dpr), ch = Math.round(H * dpr);
   if (cv.width !== cw || cv.height !== ch) { cv.width = cw; cv.height = ch; }
   const c = cv.getContext('2d');
@@ -2280,6 +2682,7 @@ function drawGraph(id) {
   c.fillStyle = '#fff'; c.fillRect(0, 0, W, H);
   if (!g.view) g.view = defaultView(g, W, H);
   if (!g.show) g.show = {};
+  followData(g);
   if (graphIs3D(g)) { renderFits(g, ge); drawGraph3D(g, ge, c, W, H); return; }
   const v = g.view;
   const X = x => (x - v.x0) / (v.x1 - v.x0) * W, Y = y => (v.y1 - y) / (v.y1 - v.y0) * H;
@@ -2332,6 +2735,9 @@ function drawGraph(id) {
     }
     for (const [k, xv] of [['a', g.a], ['b', g.b]]) drawBoundHandle(c, X(xv), clamp(Y(0), 8, H - 8), k);
   }
+  // a table's closest function: a faded grey curve under everything else
+  const datas = lines.filter(l => l.layout === 'table').map(l => [l, anOf(l)]).filter(([, an]) => an.kind === 'data');
+  for (const [, an] of datas) for (const se of an.series) if (se.fit) { c.save(); c.strokeStyle = 'rgba(96, 108, 104, 0.5)'; c.lineWidth = 2.8; c.lineJoin = 'round'; c.lineCap = 'round'; plotFn(c, se.fit.f, W, H, X, Y, IX); c.restore(); }
   // curves
   for (const l of lines) {
     const an = anOf(l), col = GCOL[(l.colorIdx || 0) % GCOL.length];
@@ -2343,6 +2749,19 @@ function drawGraph(id) {
       for (const [x, y] of ptsC) { if (!isFinite(x) || !isFinite(y)) { pen = false; continue; } const px = X(x), py = Y(y); if (pen) c.lineTo(px, py); else { c.moveTo(px, py); pen = true; } }
       c.stroke();
     } else if (an.kind === 'implicit') marching(c, (x, y) => an.c.g(scope, x, y), W, H, IX, IY, 3, [0], col);
+  }
+  // the table's points on top (with residuals to the fit when asked)
+  for (const [l, an] of datas) an.series.forEach((se, si) => {
+    const col = seriesCol(l, si);
+    if (l.resid && se.fit) { c.save(); c.setLineDash([3, 3]); c.strokeStyle = hexA(col, 0.7); c.lineWidth = 1.3; for (const [x, y] of se.pts) { const fy = se.fit.f(x); if (!isFinite(fy)) continue; c.beginPath(); c.moveTo(X(x), Y(y)); c.lineTo(X(x), clamp(Y(fy), -H, 2 * H)); c.stroke(); } c.restore(); }
+    for (const [x, y] of se.pts) { c.beginPath(); c.arc(X(x), Y(y), 4.8, 0, 2 * Math.PI); c.fillStyle = col; c.fill(); c.lineWidth = 1.6; c.strokeStyle = '#fff'; c.stroke(); }
+  });
+  if (datas.length) {   // the axes take the table's names
+    const an = datas[0][1], ax = clamp(X(0), 0, W), ay = clamp(Y(0), 0, H), yn = an.series.map(se => se.name).filter(Boolean).join(', ');
+    c.save(); c.font = 'italic 13px ui-serif, Georgia, "Times New Roman", serif'; c.fillStyle = '#1b2230'; c.lineJoin = 'round'; c.lineWidth = 3; c.strokeStyle = 'rgba(255,255,255,.9)';
+    if (an.names[0]) { c.textAlign = 'right'; c.textBaseline = 'bottom'; c.strokeText(an.names[0], W - 6, ay - 4); c.fillText(an.names[0], W - 6, ay - 4); }
+    if (yn) { c.textAlign = 'left'; c.textBaseline = 'top'; c.strokeText(yn, ax + 6, 6); c.fillText(yn, ax + 6, 6); }
+    c.restore();
   }
   // derivative
   if (f && g.show.d && pan.c.df) {
@@ -2580,6 +2999,7 @@ function build3D(g, lines, mode) {
   const v = g.view;
   const items = lines.map(l => ({ l, an: anOf(l), col: hexRGB(GCOL[(l.colorIdx || 0) % GCOL.length]) }));
   const surfs = items.filter(i => i.an.kind === 'surface'), curves = items.filter(i => i.an.kind === 'curve3d'), imps = items.filter(i => i.an.kind === 'implicit3d'), solids = items.filter(i => i.an.kind === 'solid');
+  const datas = items.filter(i => i.an.kind === 'data3d' && i.an.series[0] && i.an.series[0].pts.length);
   let x0 = v.x0, x1 = v.x1, y0 = v.y0, y1 = v.y1, lo = Infinity, hi = -Infinity;
   const solidsOnly = solids.length && !surfs.length && !imps.length && !curves.length, blank = !items.length;
   for (const it of solids) { it.v = solidVals(it.an); it.ext = solidExt(it.an.solid, it.v); }
@@ -2634,6 +3054,13 @@ function build3D(g, lines, mode) {
     }
   }
   for (const it of curves) for (const p of it.pts) if (isFinite(p[2])) { lo = Math.min(lo, p[2]); hi = Math.max(hi, p[2]); }
+  // a table in 3D: its points set the height of the box; the fitted surface may reach a little past them
+  if (datas.length) {
+    let zl = Infinity, zh = -Infinity; for (const it of datas) for (const p of it.an.series[0].pts) { zl = Math.min(zl, p[2]); zh = Math.max(zh, p[2]); }
+    const sp = Math.max(zh - zl, 1e-6), zl0 = zl - 0.35 * sp, zh0 = zh + 0.35 * sp;
+    for (const it of datas) { const fit = it.an.series[0].fit; if (!fit) continue; it.z = new Float64Array((N + 1) * (N + 1)); for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) { const q = fit.f(x0 + (x1 - x0) * i / N, y0 + (y1 - y0) * j / N); it.z[j * (N + 1) + i] = q; if (isFinite(q)) { zl = Math.min(zl, Math.max(q, zl0)); zh = Math.max(zh, Math.min(q, zh0)); } } }
+    lo = Math.min(lo, zl); hi = Math.max(hi, zh);
+  }
   if (ps0 && (g.show.vol || g.show.box) && isFinite(lo) && isFinite(hi)) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
   // on a graph made for drawing, the box stays at least a cube, so there's room to draw the next trace
   if (g.is3d && !solidsOnly) { const R = Math.max(x1 - x0, y1 - y0) / 2; lo = Math.min(isFinite(lo) ? lo : -R, -R); hi = Math.max(isFinite(hi) ? hi : R, R); }
@@ -2642,11 +3069,12 @@ function build3D(g, lines, mode) {
   const equal = !surfs.length && (imps.length || solidsOnly || blank);
   if (!imps.length && !solidsOnly && !blank) { const pad = (hi - lo) * 0.03; lo -= pad; hi += pad; }
   const hx = (x1 - x0) / 2, hy = (y1 - y0) / 2, hz = (hi - lo) / 2, xc = (x0 + x1) / 2, yc = (y0 + y1) / 2, zc = (lo + hi) / 2;
-  const bx = 1, by = hy / hx, bz = surfs.length ? 0.78 * Math.max(bx, by) : equal ? hz / hx : Math.min(1.1, Math.max(0.3, hz / hx));
+  const dataOnly = datas.length && !surfs.length && !imps.length && !solids.length && !curves.length;
+  const bx = 1, by = dataOnly ? clamp(hy / hx, 0.6, 1.6) : hy / hx, bz = surfs.length || datas.length ? 0.78 * Math.max(bx, by) : equal ? hz / hx : Math.min(1.1, Math.max(0.3, hz / hx));
   const NZ = z => clamp((z - zc) / hz * bz, -bz, bz);
   const N3 = (x, y, z) => [(x - xc) / hx * bx, (y - yc) / hy * by, NZ(z)];
   const geo = { x0, x1, y0, y1, lo, hi, bx, by, bz, NZ, N3, xc, yc, zc, hx, hy, hz, sc: [bx / hx, by / hy, bz / hz], faces: [], wires: [], floor: [], curves: [], marker: null,
-    segs: [], domains: [] };
+    segs: [], domains: [], dots: [] };
   const single = surfs.length + imps.length === 1;
   for (const it of surfs) {
     const P = (i, j) => { const q = it.z[j * (N + 1) + i]; return isFinite(q) ? N3(x0 + (x1 - x0) * i / N, y0 + (y1 - y0) * j / N, q) : null; };
@@ -2660,6 +3088,14 @@ function build3D(g, lines, mode) {
     }
   }
   for (const it of solids) solidMesh(geo, it, lo);
+  // the table's points, and its closest surface as a faded grey sheet
+  for (const it of datas) {
+    if (it.z) {
+      const P = (i, j) => { const q = it.z[j * (N + 1) + i]; return isFinite(q) ? N3(x0 + (x1 - x0) * i / N, y0 + (y1 - y0) * j / N, q) : null; };
+      for (let j = 0; j < N; j += 2) for (let i = 0; i < N; i += 2) { const a = P(i, j), b = P(i + 2, j), c2 = P(i + 2, j + 2), d = P(i, j + 2); if (a && b && c2 && d) geo.faces.push({ p: [a, b, c2, d], col: [156, 165, 162], n: faceNormal(a, b, c2, d), alpha: 0.32, ghost: true }); }
+    }
+    for (const p of it.an.series[0].pts) { const q = N3(p[0], p[1], p[2]); geo.dots.push({ p: q, f: [q[0], q[1], -bz], col: it.col }); }
+  }
   // a surface built from drawn traces shows them: z = f(x, 0) in red, z = f(0, y) in blue
   for (const it of surfs) if (it.l.traces) {
     const f = (x, y) => it.an.c.f(scope, x, y), m = 90, ok = z => isFinite(z) && z >= lo && z <= hi;
@@ -2886,6 +3322,7 @@ function render3D(g, geo, c, W, H) {
     if (f.smooth) { c.strokeStyle = c.fillStyle; c.lineWidth = 0.7; }
     else if (f.box) { c.strokeStyle = 'rgba(16,40,36,.45)'; c.lineWidth = 0.8; }
     else if (f.tint) { c.strokeStyle = rgb(f.tint, 0.35); c.lineWidth = 0.6; }
+    else if (f.ghost) { c.strokeStyle = 'rgba(70,82,78,.22)'; c.lineWidth = 0.6; }
     else if (f.alpha && f.main) { c.strokeStyle = 'rgba(20,28,45,.1)'; c.lineWidth = 0.5; }
     else if (f.alpha) { c.strokeStyle = 'rgba(122,63,209,.3)'; c.lineWidth = 0.6; }
     else if (f.tri) { c.strokeStyle = rgb(col); c.lineWidth = 0.6; }
@@ -2911,6 +3348,11 @@ function render3D(g, geo, c, W, H) {
     ln.pts.forEach((p3, i) => { const q = T(p3); i ? c.lineTo(q[0], q[1]) : c.moveTo(q[0], q[1]); }); c.stroke();
   }
   if (geo.dirFloor) { const a = T(geo.dirFloor[0]), b = T(geo.dirFloor[1]); arrow(c, a[0], a[1], b[0], b[1], '#e5484d', 2.2); }
+  if (geo.dots && geo.dots.length) {   // the table's points, far to near, each with a dashed drop to the floor
+    const ds = geo.dots.map(d => ({ d, q: T(d.p), f: T(d.f) })).sort((a, b) => b.q[2] - a.q[2]);
+    for (const { d, q, f } of ds) { c.save(); c.setLineDash([2, 3]); c.strokeStyle = rgb(d.col, 0.45); c.lineWidth = 1; c.beginPath(); c.moveTo(q[0], q[1]); c.lineTo(f[0], f[1]); c.stroke(); c.restore(); c.beginPath(); c.arc(f[0], f[1], 1.8, 0, 2 * Math.PI); c.fillStyle = rgb(d.col, 0.45); c.fill(); }
+    for (const { d, q } of ds) { c.beginPath(); c.arc(q[0], q[1], 4.8, 0, 2 * Math.PI); c.fillStyle = rgb(d.col); c.fill(); c.lineWidth = 1.6; c.strokeStyle = '#fff'; c.stroke(); }
+  }
   if (geo.marker) {
     const m = T(geo.marker), mf = T(geo.markerFloor);
     c.save(); c.setLineDash([3, 3]); c.strokeStyle = 'rgba(122,63,209,.8)'; c.lineWidth = 1.2; seg(m, mf); c.restore();
@@ -2935,6 +3377,7 @@ function lineLabel(l) {
   if (an.kind === 'implicit3d') return `${ME.pp(an.g.a)} = ${ME.pp(an.g.b)}`;
   if (an.kind === 'curve3d') return `(${ME.pp(an.fx)}, ${ME.pp(an.fy)}, ${ME.pp(an.fz)})`;
   if (an.kind === 'solid') return solidShort(an);
+  if (an.kind === 'data3d') return `Table: ${an.series[0].pts.length} points (${an.names.map(n => `<i>${esc(n)}</i>`).join(', ')})`;
   return l.expr;
 }
 function planeEq(z0, fx, fy, px, py) {
@@ -3016,7 +3459,7 @@ function drawGraph3D(g, ge, c, W, H) {
   if (surf && MODES2D.has(mode)) drawSurface2D(g, c, W, H, surf, mode, legend);
   else {
     calcDefaults(g);
-    const key = JSON.stringify([lines.map(l => l.id + ':' + l.expr), g.view, mode, scopeKey(lines), g.show, g.px, g.py, g.R, g.nb, g.dirA]);
+    const key = JSON.stringify([lines.map(l => l.id + ':' + l.expr + ':' + (l.layout === 'table' ? l.ver : '')), g.view, mode, scopeKey(lines), g.show, g.px, g.py, g.R, g.nb, g.dirA]);
     if (ge.geoKey !== key) { ge.geo = build3D(g, lines, mode); ge.geoKey = key; }
     render3D(g, ge.geo, c, W, H);
     const nonSolid = lines.filter(l => anOf(l).kind !== 'solid');
@@ -3161,6 +3604,16 @@ function selectByLasso(poly) {
   sel = { ids, gids, iids };
   renderSelection();
 }
+// bigger / smaller with a tap (the corner handle is small under a finger): about the top-left, kept on the page
+function scaleSelection(k) {
+  const b0 = selBB(); if (!b0) return;
+  k = clamp(k, 30 / Math.max(1, Math.min(b0.w, b0.h)), (PAGE_W - 48) / Math.max(1, b0.w));
+  const ox = clamp(b0.x0, 24, Math.max(24, PAGE_W - 24 - b0.w * k)), oy = b0.y0;
+  for (const id of sel.ids) { const s = doc.strokes[id]; if (!s) continue; touch(id); s.pts = s.pts.map(p => [r1(ox + (p[0] - b0.x0) * k), r1(oy + (p[1] - b0.y0) * k), p[2]]); s.w = r2(s.w * (s.tool === 'hl' ? Math.sqrt(k) : k)); renderStroke(s); }
+  for (const iid of sel.iids || []) { const im = doc.imgs.find(q => q.id === iid); if (!im) continue; im.x = r1(ox + (im.x - b0.x0) * k); im.y = r1(oy + (im.y - b0.y0) * k); im.w = r1(im.w * k); im.h = r1(im.h * k); }
+  for (const l of doc.lines) if (l.strokeIds.some(id => sel.ids.includes(id))) l.charH = l.layout === 'table' ? Math.round((l.charH || 30) * k) : null;
+  renderImgs(); renderSelection(); renderOverlays(); renderChips();
+}
 function selBB() {
   if (!sel) return null;
   const bbs = sel.ids.map(id => doc.strokes[id] && bbox(doc.strokes[id]));
@@ -3179,6 +3632,7 @@ function renderSelection() {
   if (sel.ids.length || (sel.iids || []).length) gTemp.appendChild(S('circle', { cx: b.x1 + pad, cy: b.y1 + pad, r: 8 / view.s, class: 'sel sel-handle' }));
   menu.hidden = false;
   $('#selRead').hidden = !sel.ids.length;
+  $('#selSize').hidden = !(sel.ids.length || (sel.iids || []).length); $('#selFitW').hidden = !(sel.iids || []).length;
   positionOverlays();
 }
 function clearSelection() { sel = null; renderSelection(); }
@@ -3192,6 +3646,7 @@ function selAction(act, arg) {
     const newImgs = []; for (const iid of sel.iids || []) { const im = doc.imgs.find(q => q.id === iid); if (im) { const c = Object.assign({}, im, { id: uid(), x: im.x + 24, y: im.y + 24 }); doc.imgs.push(c); newImgs.push(c.id); } }
     sel = { ids: newIds, gids: [], iids: newImgs }; renderImgs();
   });
+  else if (act === 'size' || act === 'fitw') { const b = selBB(); if (!b) return; transact(() => scaleSelection(act === 'fitw' ? (PAGE_W - 48) / Math.max(1, b.w) : arg === '1' ? 1.2 : 1 / 1.2)); }
   else if (act === 'color') transact(() => { for (const id of sel.ids) { const s = doc.strokes[id]; if (!s || s.tool === 'hl') continue; touch(id); s.color = s.tool === 'pencil' ? PENCIL[INK.indexOf(arg)] || arg : arg; } });
   else if (act === 'read') {
     transact(() => {
@@ -3234,6 +3689,8 @@ function saveInputPrefs() { try { localStorage.setItem(INPUT_KEY, JSON.stringify
 let penSeen = !!inputPrefs.penSeen;
 function fingersDraw() { return inputPrefs.pencilOnly === false || (inputPrefs.pencilOnly == null && !penSeen); }
 function notePen() {
+  // Safari and the Claude app don't pass the Pencil's double-tap to web pages: say once where it works
+  if (!NATIVE && !inputPrefs.dtHint) { inputPrefs.dtHint = true; saveInputPrefs(); setTimeout(() => toast('Tip: double-tapping the Pencil switches pen ⇄ eraser in the iPad app. In a browser, tap the switch at the bottom-left.'), penSeen ? 400 : 4200); }
   if (penSeen) return;
   penSeen = true; inputPrefs.penSeen = true; saveInputPrefs();
   updateInputUI();
@@ -3566,7 +4023,7 @@ function finishGesture(g, e, cancelled) {
   if (g.type === 'selMove' || g.type === 'selScale') {
     // line bookkeeping: partial moves make lines dirty
     for (const l of doc.lines) { const inSel = l.strokeIds.filter(id => sel.ids.includes(id)).length; if (inSel && inSel < l.strokeIds.length) lineChanged(l); }
-    if (g.type === 'selScale') for (const l of doc.lines) if (l.strokeIds.some(id => sel.ids.includes(id))) l.charH = null;
+    if (g.type === 'selScale') for (const l of doc.lines) if (l.strokeIds.some(id => sel.ids.includes(id)) && l.layout !== 'table') l.charH = null;
     endTx(); refresh(); scheduleIdle(); markVisibleDirty();
   }
 }
@@ -4001,7 +4458,7 @@ async function initDownloads() {
 }
 function currentPage() { const r = viewport.getBoundingClientRect(); const [, wy] = toWorld(r.left + r.width / 2, r.top + r.height / 2); return clamp(Math.floor(wy / (PAGE_H + PAGE_GAP)), 0, doc.pages - 1); }
 async function exportPage() {
-  const pi = currentPage(), oy = pageY(pi), k = 2;
+  const pi = currentPage(), oy = pageY(pi), k = 3;
   const cv = document.createElement('canvas'); cv.width = PAGE_W * k; cv.height = PAGE_H * k;
   const c = cv.getContext('2d'); c.scale(k, k); c.translate(0, -oy);
   drawPageBase(c, doc.pageList[pi], oy);
@@ -4275,7 +4732,7 @@ $('#importBtn').onclick = e => { e.stopPropagation(); const m = $('#importMenu')
 $('#importMenu').addEventListener('click', e => { const b = e.target.closest('[data-imp]'); if (!b) return; closeMenus(); if (b.dataset.imp === 'img') $('#imgFile').click(); else if (b.dataset.imp === 'pdf') { pdfTarget = 'notebook'; $('#pdfFile').click(); } else { importTarget = 'notebook'; $('#openFile').click(); } });
 
 /* ---------- import: images & PDF ---------- */
-async function fileToImage(file, maxDim = 1800) {
+async function fileToImage(file, maxDim = 2800) {
   const url = URL.createObjectURL(file);
   try {
     const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
@@ -4285,7 +4742,7 @@ async function fileToImage(file, maxDim = 1800) {
     const png = file.type === 'image/png' || file.type === 'image/gif';
     if (!png) { c.fillStyle = '#fff'; c.fillRect(0, 0, cv.width, cv.height); }
     c.drawImage(im, 0, 0, cv.width, cv.height);
-    return { src: cv.toDataURL(png ? 'image/png' : 'image/jpeg', 0.86), w: cv.width, h: cv.height };
+    return { src: cv.toDataURL(png ? 'image/png' : 'image/jpeg', 0.9), w: cv.width, h: cv.height };
   } finally { URL.revokeObjectURL(url); }
 }
 async function importImages(files) {
@@ -4326,11 +4783,11 @@ async function pdfToPages(file, progress) {
   for (let n = 1; n <= pdf.numPages; n++) {
     const page = await pdf.getPage(n), v1 = page.getViewport({ scale: 1 });
     const fit = Math.min(PAGE_W / v1.width, PAGE_H / v1.height), w = v1.width * fit, h = v1.height * fit;
-    const vp = page.getViewport({ scale: fit * 1.6 });
+    const vp = page.getViewport({ scale: fit * 2.5 });
     const cv = document.createElement('canvas'); cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
     const c = cv.getContext('2d'); c.fillStyle = '#fff'; c.fillRect(0, 0, cv.width, cv.height);
     await page.render({ canvasContext: c, viewport: vp }).promise;
-    out.push({ src: cv.toDataURL('image/jpeg', 0.82), w: Math.round(w), h: Math.round(h) });
+    out.push({ src: cv.toDataURL('image/jpeg', 0.9), w: Math.round(w), h: Math.round(h) });
     progress && progress(n, pdf.numPages);
   }
   return out;
@@ -4402,8 +4859,8 @@ function renderPageCanvas(i, k = 2) {
 async function makePdf(list) {
   const pages = [];
   for (const i of list) {
-    const cv = renderPageCanvas(i, 2);
-    const blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.88));
+    const cv = renderPageCanvas(i, 2.5);
+    const blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.9));
     pages.push({ bytes: new Uint8Array(await blob.arrayBuffer()), w: cv.width, h: cv.height });
   }
   return buildPdf(pages);
@@ -4748,6 +5205,6 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   renderLibrary();
   getSampler();
   initDownloads();
-  window.__app = { insertBlankGraph, recognizeSketch, SolidFit, composeTraces, getSampler, readState: () => readState, graph3: gid => { const g = graphById(gid), ge = graphEls.get(gid); if (!g || !ge || !ge.geo) return null; const r = ge.canvas.getBoundingClientRect(), k = r.width / (ge.canvas.clientWidth || 1), pr = proj3(ge.geo, camOf(g), ge.canvas.clientWidth, ge.canvas.clientHeight); return { hits: ge.geo.hits, rect: [r.left, r.top, r.width, r.height], proj: p => { const q = pr.T(ge.geo.N3(p[0], p[1], p[2])); return [r.left + q[0] * k, r.top + q[1] * k]; }, unproj: (cx, cy, ax) => pr.unproj((cx - r.left) / k, (cy - r.top) / k, ax), geo: { x0: ge.geo.x0, x1: ge.geo.x1, lo: ge.geo.lo, hi: ge.geo.hi } }; }, unitsPerPx: gid => unitsPerPx(graphById(gid), graphEls.get(gid)), sketchAlpha: lid => sketchAlpha(lineById(lid)), openLineMenu: lid => openLineMenu(lineById(lid)), lineMenuOpen: () => !!lmenu, toggleLock: gid => toggleLock(graphById(gid)), loopScreen: lid => { const l = lineById(lid); if (!l || !loopState(l)) return null; const b = loopBox(l); return [toScreen(b.x0, b.y0), toScreen(b.x1, b.y1)]; }, anchorScreen: (lid, ai) => { const l = lineById(lid); const an = l && l.anchors[ai]; if (!an) return null; const bb = anchorBB(l, an); return toScreen(bb.cx, (bb.y0 + bb.y1) / 2); }, input: () => ({ gesture: gesture && gesture.type, penSeen, fingersDraw: fingersDraw(), tool: ui.tool, touches: touches.size, palms: palmIds.size, undo: undoStack.length, redo: redoStack.length }), inputPrefs, doc: () => doc, view, applyReading, lineById, refresh, onIdle, undo, redo, lib: () => lib, openNotebook, closeNotebook, makePdf, insertPages, deletePages, duplicatePages, currentPage, goToPage };
+  window.__app = { dbg: { frameSegs: id => frameSegs(doc.strokes[id]), findTables: () => { const pool = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic; }); const T = findTables(pool); return { pool: pool.length, tables: T.tables, frames: [...T.frames] }; }, shape: id => { try { return InkShape.recognize(doc.strokes[id].pts.map(p => [p[0], p[1]]), 1); } catch (e) { return String(e); } } }, anOf: lid => { const a = anOf(lineById(lid)); return a ? { kind: a.kind, name: a.name, vmap: a.vmap, series: (a.series || []).map(se => ({ n: se.pts.length, fit: se.fit && { fam: se.fit.fam, expr: se.fit.expr, r2: se.fit.r2 } })) } : null; }, valueOf: lid => { const a = anOf(lineById(lid)); return a && a.c && a.c.lhs ? a.c.lhs(scope) : null; }, geoDots: gid => { const ge = graphEls.get(gid); return ge && ge.geo && ge.geo.dots ? ge.geo.dots.length : null; }, insertBlankGraph, recognizeSketch, SolidFit, composeTraces, getSampler, readState: () => readState, graph3: gid => { const g = graphById(gid), ge = graphEls.get(gid); if (!g || !ge || !ge.geo) return null; const r = ge.canvas.getBoundingClientRect(), k = r.width / (ge.canvas.clientWidth || 1), pr = proj3(ge.geo, camOf(g), ge.canvas.clientWidth, ge.canvas.clientHeight); return { hits: ge.geo.hits, rect: [r.left, r.top, r.width, r.height], proj: p => { const q = pr.T(ge.geo.N3(p[0], p[1], p[2])); return [r.left + q[0] * k, r.top + q[1] * k]; }, unproj: (cx, cy, ax) => pr.unproj((cx - r.left) / k, (cy - r.top) / k, ax), geo: { x0: ge.geo.x0, x1: ge.geo.x1, lo: ge.geo.lo, hi: ge.geo.hi } }; }, unitsPerPx: gid => unitsPerPx(graphById(gid), graphEls.get(gid)), sketchAlpha: lid => sketchAlpha(lineById(lid)), openLineMenu: lid => openLineMenu(lineById(lid)), lineMenuOpen: () => !!lmenu, toggleLock: gid => toggleLock(graphById(gid)), loopScreen: lid => { const l = lineById(lid); if (!l || !loopState(l)) return null; const b = loopBox(l); return [toScreen(b.x0, b.y0), toScreen(b.x1, b.y1)]; }, anchorScreen: (lid, ai) => { const l = lineById(lid); const an = l && l.anchors[ai]; if (!an) return null; const bb = anchorBB(l, an); return toScreen(bb.cx, (bb.y0 + bb.y1) / 2); }, input: () => ({ gesture: gesture && gesture.type, penSeen, fingersDraw: fingersDraw(), tool: ui.tool, touches: touches.size, palms: palmIds.size, undo: undoStack.length, redo: redoStack.length }), inputPrefs, doc: () => doc, view, applyReading, lineById, refresh, onIdle, undo, redo, lib: () => lib, openNotebook, closeNotebook, makePdf, insertPages, deletePages, duplicatePages, currentPage, goToPage };
 })();
 })();

@@ -2,7 +2,7 @@ import UIKit
 import WebKit
 
 /// The whole app: the notebook page in a WKWebView, plus the things only a native iPad app can do —
-/// Apple Pencil double-tap and squeeze switch pen ⇄ eraser (as set in Settings → Apple Pencil),
+/// Apple Pencil double-tap and squeeze switch pen ⇄ eraser,
 /// Apple Pencil Pro taps your hand when a drawn shape snaps, Scribble is kept from turning ink into
 /// typed text, and exports go to the share sheet.
 final class NotebookViewController: UIViewController {
@@ -69,7 +69,11 @@ final class NotebookViewController: UIViewController {
     // writing near the bottom edge shouldn't pull up the Home screen on the first swipe
     override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge { .bottom }
 
+    private var lastToggle = Date.distantPast
     private func toggleEraser() {
+        // one tap can arrive through two routes on some iPadOS versions: switch only once
+        guard Date().timeIntervalSince(lastToggle) > 0.25 else { return }
+        lastToggle = Date()
         webView.evaluateJavaScript("window.LiveMath && window.LiveMath.pencilDoubleTap && window.LiveMath.pencilDoubleTap()")
     }
 
@@ -114,22 +118,22 @@ final class NotebookViewController: UIViewController {
 // MARK: - Apple Pencil
 
 extension NotebookViewController: UIPencilInteractionDelegate {
+    // Double-tap (and squeeze on Apple Pencil Pro) always switches pen ⇄ eraser here, whatever the iPad's
+    // Pencil setting says, so the gesture works the way it does in other note apps.
     // iPadOS 12.1 – 17.4
     func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
         if #available(iOS 17.5, *) { return }
-        guard UIPencilInteraction.preferredTapAction != .ignore else { return }
         toggleEraser()
     }
 
     @available(iOS 17.5, *)
     func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
-        guard UIPencilInteraction.preferredTapAction != .ignore else { return }
         toggleEraser()
     }
 
     @available(iOS 17.5, *)
     func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
-        guard squeeze.phase == .ended, UIPencilInteraction.preferredSqueezeAction != .ignore else { return }
+        guard squeeze.phase == .ended else { return }
         toggleEraser()
     }
 }

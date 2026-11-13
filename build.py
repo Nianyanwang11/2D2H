@@ -12,7 +12,7 @@ import os
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(ROOT, 'src')
-PARTS = {'MATH': 'math.js', 'FONT': 'font.js', 'FIT': 'sketchfit.js', 'SOLID': 'solidfit.js', 'SHAPE': 'inkshape.js', 'APP': 'app.js'}
+PARTS = {'MATH': 'math.js', 'FONT': 'font.js', 'FIT': 'sketchfit.js', 'SOLID': 'solidfit.js', 'SHAPE': 'inkshape.js', 'DATA': 'datafit.js', 'APP': 'app.js'}
 
 
 def read(name):
