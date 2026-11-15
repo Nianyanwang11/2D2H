@@ -246,7 +246,7 @@ function collectUserFns(lines) {
   const sig = JSON.stringify(fns);
   if (sig !== userFnSig) { userFns = fns; userFnSig = sig; }
 }
-const callsUserFn = expr => { for (const n in userFns) if (expr.includes(n + '(') || expr.includes(n + ' (')) return true; return false; };
+const callsUserFn = expr => { for (const n in userFns) if (expr.includes(n + '(') || expr.includes(n + ' (') || expr.includes(n + "'") || expr.includes(n + '_')) return true; return false; };
 function anOf(l) {
   if (l.layout === 'table') return tableAnalysis(l);
   const key = l.expr && callsUserFn(l.expr) ? l.expr + '\u0000' + userFnSig : l.expr;
@@ -982,6 +982,7 @@ The ink is split into exactly ${n} separate clusters, spaced apart, left to righ
 Reply with only a JSON object: {"expr": string, "clusters": string[], "ok": boolean}
 - "clusters": exactly ${n} strings, one per ink cluster in left-to-right order: what is written in that cluster. Usually one symbol ("2", "x", "=", "+", "(", "θ"). A cluster may hold several symbols if they touch (e.g. "sin", "12") or are stacked (a fraction like "(x+1)/2").
 - "expr": the whole line as plain-text math: + - * / ^ ( ) with explicit * for multiplication; functions sin cos tan sec csc cot asin acos atan sinh cosh tanh ln log sqrt abs exp; constants pi and e; write θ as theta. Small raised symbols are exponents (x^2). Keep every number exactly as written. Keep a trailing "=" if nothing follows it. Two equations on one line separated by a comma stay comma-separated.
+- Calculus is written in these forms: derivatives f'(x), f''(2), d/dx(x^2*sin(x)), d^2/dx^2(…), partial derivatives diff(x^2*y, x) or f_x(x, y), f_xy(1, 2); integrals int(x^2, x) and int(x^2, x, 0, 1) (lower bound, then upper), a double integral int(int(x*y, x, 0, 1), y, 0, 2); limits lim(sin(x)/x, x, 0), lim(1/x, x, inf), from one side limr(…) or liml(…), two variables lim(x*y/(x^2+y^2), (x, y), (0, 0)). Leave out "dx".
 - Function notation stays as written, with its name and variables: f(x) = x^2, f(x, y) = x^2 + y^2, g(t) = 3*t, f(1, 2) =, z = f(x, y). The comma between variables belongs to the function; it does not split the line.
 - "ok": false if the line is not math.
 Example, a line "y = 3x² − 1" in 7 clusters: {"expr":"y = 3*x^2 - 1","clusters":["y","=","3","x","2","-","1"],"ok":true}
@@ -1398,11 +1399,9 @@ function renderOverlays() {
         for (const g of lay.glyphs) for (const st of g.strokes) gOver.appendChild(S('path', { d: outlinePath(st, 2.6), fill: ANSWER, class: 'answer' }));
       }
     }
-    if (an.kind === 'evaluate') {
-      const v = an.c.lhs(scope);
+    if (hasAnswer(l, an)) {
       const eq = l.clusters.length ? clusterBB(l.clusters[l.clusters.length - 1]) : lineBB(l);
-      const txt = ME.fmt(v).replace(/−/g, '-');
-      const lay = HandFont.layout(isFinite(v) ? txt : '?', eq.x1 + 0.35 * h, eq.cy - 0.52 * h, h, 99 + l.id);
+      const lay = HandFont.layout(answerText(an), eq.x1 + 0.35 * h, eq.cy - 0.52 * h, h, 99 + l.id);
       for (const g of lay.glyphs) for (const st of g.strokes) gOver.appendChild(S('path', { d: outlinePath(st, 2.6), fill: ANSWER, class: 'answer' }));
     }
     for (const a of l.anchors || []) {
@@ -1496,7 +1495,7 @@ function loopBox(l) {
   let { x0, y0, x1, y1 } = b;
   if (l.status === 'ok' && !l.dirty) {
     const an = anOf(l);
-    if (an.kind === 'evaluate' && l.layout !== 'column') { const v = an.c.lhs(scope); x1 += 0.35 * h + HandFont.advance(isFinite(v) ? ME.fmt(v).replace(/−/g, '-') : '?', h); }
+    if (hasAnswer(l, an)) x1 += 0.35 * h + HandFont.advance(answerText(an), h);
     if (l.layout === 'column') { const sp = columnAnswerSpot(l); if (sp) { y1 = Math.max(y1, sp.top + sp.h); x1 = Math.max(x1, sp.right); x0 = Math.min(x0, sp.B.x0); } }
   }
   const pad = clamp(0.3 * h, 6, 14);
@@ -1606,12 +1605,26 @@ function litRoles(expr) {
 
 let lmenu = null;
 const KIND_LABEL = { solid: 'Solid', function: 'Function', polar: 'Polar curve', parametric: 'Parametric curve', implicit: 'Curve', surface: 'Surface', curve3d: '3D curve', implicit3d: '3D surface', evaluate: 'Calculation', value: 'Calculation', check: 'Check', solve: 'Equation', assign: 'Variable', define: 'Function of x, y, z', data: 'Table', data3d: 'Table (x, y, z)' };
+// what's written after a line's "=": a number (1/3, π/4 for calculus), ∞, DNE, or a formula (3x² − 2)
+function answerText(an) {
+  if (an.answer) return exprToHand(an.answer);
+  const v = an.c.lhs(scope);
+  if (isNaN(v)) return an.dne ? 'DNE' : '?';
+  if (!isFinite(v)) return v > 0 ? '∞' : '-∞';
+  if (an.calc && !Number.isInteger(v)) {
+    const r = Calc.frac(v); if (r) return `${r[0]}/${r[1]}`;
+    const p = Calc.frac(v / Math.PI); if (p && p[1] <= 12) return `${p[0] === 1 ? '' : p[0] === -1 ? '-' : p[0]}π${p[1] === 1 ? '' : '/' + p[1]}`;
+  }
+  return ME.fmt(v).replace(/−/g, '-');
+}
+const hasAnswer = (l, an) => l.layout !== 'column' && (an.kind === 'evaluate' || !!an.answer);
 const fnNameHTML = name => esc(name).replace(/\(([^)]*)\)/, (m, a) => '(' + a.split(',').map(v => `<i>${v.trim()}</i>`).join(', ') + ')');
 const prettyText = t => esc(t).replace(/\*/g, '·').replace(/\^2\b/g, '²').replace(/\^3\b/g, '³').replace(/-/g, '−');
 function lineMathHTML(l, an) {
   const show = n => ME.pp(n, an.vmap ? { varHtml: v => `<i>${esc(an.vmap[v] || v)}</i>` } : undefined);
   if (an.kind === 'data' || an.kind === 'data3d') return tableHTML(an);
-  if (an.expanded && (an.kind === 'evaluate' || an.kind === 'value')) return `${prettyText(an.orig.split('=')[0].trim())} = <b>${ME.fmt(an.c.lhs(scope))}</b>`;
+  if (an.expanded && (an.kind === 'evaluate' || an.kind === 'value')) return `${prettyText(an.orig.split('=')[0].trim())} = <b>${esc(answerText(an).replace(/-/g, '−'))}</b>`;
+  if (an.answer) return `${prettyText(an.name)} = ${show(an.f)}${an.plusC ? ' + <i>C</i>' : ''}`;
   switch (an.kind) {
     case 'define': return `${fnNameHTML(an.name)} = ${show(an.f)}`;
     case 'function': return `${an.name === 'y' ? '<i>y</i>' : fnNameHTML(an.name)} = ${show(an.f)}`;
@@ -1643,7 +1656,8 @@ function renderLineMenu() {
   if (!lineById(l.id) || !loopState(l)) { closeLineMenu(); return; }
   const ok = loopState(l) === 'ok', an = ok ? anOf(l) : null;
   const isData = !!an && (an.kind === 'data' || an.kind === 'data3d');
-  let h = `<div class="lm-head"><span class="lm-kind">${l.fittedFrom ? 'Fit to your table' : l.fitted ? 'From your sketch' : an ? (KIND_LABEL[an.kind] || 'Math') : l.layout === 'table' ? 'Table · not read' : 'Not read'}</span><span class="lm-math">${an ? lineMathHTML(l, an) : (l.expr ? esc(l.expr) : '')}</span><button class="lm-x" data-a="close" aria-label="Close">×</button></div>`;
+  const CALC_LABEL = { derivative: 'Derivative', integral: 'Integral', limit: 'Limit' };
+  let h = `<div class="lm-head"><span class="lm-kind">${l.fittedFrom ? 'Fit to your table' : l.fitted ? 'From your sketch' : an && an.calc ? CALC_LABEL[an.calc] + (an.answer ? ' · graphable' : '') : an ? (KIND_LABEL[an.kind] || 'Math') : l.layout === 'table' ? 'Table · not read' : 'Not read'}</span><span class="lm-math">${an ? lineMathHTML(l, an) : (l.expr ? esc(l.expr) : '')}</span><button class="lm-x" data-a="close" aria-label="Close">×</button></div>`;
   lmenu.rows = [];
   if (!an) {
     const why = l.status === 'unavailable' ? 'Handwriting can only be read when this page is open in Claude.' : l.status === 'notmath' ? 'This doesn’t look like math.' : l.status === 'error' ? (l.err || 'Couldn’t read this line.') : 'This line hasn’t been read yet.';
@@ -1653,6 +1667,8 @@ function renderLineMenu() {
     const solid = an.kind === 'solid';
     if (solid) h += `<p class="lm-note lm-solid">${solidInfoHTML(l, an)}</p>`;
     if (isData) h += tableMenuHTML(l, an);
+    if (an.dne) h += `<p class="lm-note">The limit doesn't exist${typeof an.dne === 'string' ? ': ' + esc(an.dne) : ''}.</p>`;
+    if (an.calc === 'integral' && an.plusC) h += `<p class="lm-note">Plus any constant <i>C</i>. The graph shows <i>C</i> = 0.</p>`;
     if (an.kind === 'define') h += `<p class="lm-note">A function of three variables can't be drawn, but any line can use it: ${fnNameHTML(an.name.replace(/\(.*\)/, '(' + an.vars.map((v, i) => i + 1).join(', ') + ')'))} =</p>`;
     if (l.traces && !(l.traces.x && l.traces.y)) h += `<p class="lm-note">Now draw how <i>z</i> changes along <i>${l.traces.x ? 'y' : 'x'}</i> to finish the surface.</p>`;
     // sliders: every number written in the line, plus free variables
@@ -2331,7 +2347,7 @@ function exprToHand(expr) {
     t = t.slice(0, i) + '|' + t.slice(i + 4, j) + '|' + t.slice(j + 1);
   }
   t = t.replace(/(π\/\d+)\*x/g, '($1)x');
-  t = t.replace(/([0-9π)])\*(?=[a-zπ(√|])/g, '$1').replace(/\*/g, '×');
+  t = t.replace(/([0-9a-zπ)])\*(?=[a-zπ(√|])/g, '$1').replace(/\*/g, '×');
   return t;
 }
 function writeFitOnPage(l) {
@@ -5205,6 +5221,6 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   renderLibrary();
   getSampler();
   initDownloads();
-  window.__app = { dbg: { frameSegs: id => frameSegs(doc.strokes[id]), findTables: () => { const pool = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic; }); const T = findTables(pool); return { pool: pool.length, tables: T.tables, frames: [...T.frames] }; }, shape: id => { try { return InkShape.recognize(doc.strokes[id].pts.map(p => [p[0], p[1]]), 1); } catch (e) { return String(e); } } }, anOf: lid => { const a = anOf(lineById(lid)); return a ? { kind: a.kind, name: a.name, vmap: a.vmap, series: (a.series || []).map(se => ({ n: se.pts.length, fit: se.fit && { fam: se.fit.fam, expr: se.fit.expr, r2: se.fit.r2 } })) } : null; }, valueOf: lid => { const a = anOf(lineById(lid)); return a && a.c && a.c.lhs ? a.c.lhs(scope) : null; }, geoDots: gid => { const ge = graphEls.get(gid); return ge && ge.geo && ge.geo.dots ? ge.geo.dots.length : null; }, insertBlankGraph, recognizeSketch, SolidFit, composeTraces, getSampler, readState: () => readState, graph3: gid => { const g = graphById(gid), ge = graphEls.get(gid); if (!g || !ge || !ge.geo) return null; const r = ge.canvas.getBoundingClientRect(), k = r.width / (ge.canvas.clientWidth || 1), pr = proj3(ge.geo, camOf(g), ge.canvas.clientWidth, ge.canvas.clientHeight); return { hits: ge.geo.hits, rect: [r.left, r.top, r.width, r.height], proj: p => { const q = pr.T(ge.geo.N3(p[0], p[1], p[2])); return [r.left + q[0] * k, r.top + q[1] * k]; }, unproj: (cx, cy, ax) => pr.unproj((cx - r.left) / k, (cy - r.top) / k, ax), geo: { x0: ge.geo.x0, x1: ge.geo.x1, lo: ge.geo.lo, hi: ge.geo.hi } }; }, unitsPerPx: gid => unitsPerPx(graphById(gid), graphEls.get(gid)), sketchAlpha: lid => sketchAlpha(lineById(lid)), openLineMenu: lid => openLineMenu(lineById(lid)), lineMenuOpen: () => !!lmenu, toggleLock: gid => toggleLock(graphById(gid)), loopScreen: lid => { const l = lineById(lid); if (!l || !loopState(l)) return null; const b = loopBox(l); return [toScreen(b.x0, b.y0), toScreen(b.x1, b.y1)]; }, anchorScreen: (lid, ai) => { const l = lineById(lid); const an = l && l.anchors[ai]; if (!an) return null; const bb = anchorBB(l, an); return toScreen(bb.cx, (bb.y0 + bb.y1) / 2); }, input: () => ({ gesture: gesture && gesture.type, penSeen, fingersDraw: fingersDraw(), tool: ui.tool, touches: touches.size, palms: palmIds.size, undo: undoStack.length, redo: redoStack.length }), inputPrefs, doc: () => doc, view, applyReading, lineById, refresh, onIdle, undo, redo, lib: () => lib, openNotebook, closeNotebook, makePdf, insertPages, deletePages, duplicatePages, currentPage, goToPage };
+  window.__app = { answerOf: lid => { const l = lineById(lid), a = l && anOf(l); return a && (a.kind === 'evaluate' || a.answer) ? answerText(a) : a ? 'kind:' + a.kind + (a.error ? ' ' + a.error : '') : null; }, dbg: { frameSegs: id => frameSegs(doc.strokes[id]), findTables: () => { const pool = doc.order.filter(id => { const s = doc.strokes[id]; return s && s.tool !== 'hl' && !s.lineId && !s.synthetic; }); const T = findTables(pool); return { pool: pool.length, tables: T.tables, frames: [...T.frames] }; }, shape: id => { try { return InkShape.recognize(doc.strokes[id].pts.map(p => [p[0], p[1]]), 1); } catch (e) { return String(e); } } }, anOf: lid => { const a = anOf(lineById(lid)); return a ? { kind: a.kind, name: a.name, vmap: a.vmap, series: (a.series || []).map(se => ({ n: se.pts.length, fit: se.fit && { fam: se.fit.fam, expr: se.fit.expr, r2: se.fit.r2 } })) } : null; }, valueOf: lid => { const a = anOf(lineById(lid)); return a && a.c && a.c.lhs ? a.c.lhs(scope) : null; }, geoDots: gid => { const ge = graphEls.get(gid); return ge && ge.geo && ge.geo.dots ? ge.geo.dots.length : null; }, insertBlankGraph, recognizeSketch, SolidFit, composeTraces, getSampler, readState: () => readState, graph3: gid => { const g = graphById(gid), ge = graphEls.get(gid); if (!g || !ge || !ge.geo) return null; const r = ge.canvas.getBoundingClientRect(), k = r.width / (ge.canvas.clientWidth || 1), pr = proj3(ge.geo, camOf(g), ge.canvas.clientWidth, ge.canvas.clientHeight); return { hits: ge.geo.hits, rect: [r.left, r.top, r.width, r.height], proj: p => { const q = pr.T(ge.geo.N3(p[0], p[1], p[2])); return [r.left + q[0] * k, r.top + q[1] * k]; }, unproj: (cx, cy, ax) => pr.unproj((cx - r.left) / k, (cy - r.top) / k, ax), geo: { x0: ge.geo.x0, x1: ge.geo.x1, lo: ge.geo.lo, hi: ge.geo.hi } }; }, unitsPerPx: gid => unitsPerPx(graphById(gid), graphEls.get(gid)), sketchAlpha: lid => sketchAlpha(lineById(lid)), openLineMenu: lid => openLineMenu(lineById(lid)), lineMenuOpen: () => !!lmenu, toggleLock: gid => toggleLock(graphById(gid)), loopScreen: lid => { const l = lineById(lid); if (!l || !loopState(l)) return null; const b = loopBox(l); return [toScreen(b.x0, b.y0), toScreen(b.x1, b.y1)]; }, anchorScreen: (lid, ai) => { const l = lineById(lid); const an = l && l.anchors[ai]; if (!an) return null; const bb = anchorBB(l, an); return toScreen(bb.cx, (bb.y0 + bb.y1) / 2); }, input: () => ({ gesture: gesture && gesture.type, penSeen, fingersDraw: fingersDraw(), tool: ui.tool, touches: touches.size, palms: palmIds.size, undo: undoStack.length, redo: redoStack.length }), inputPrefs, doc: () => doc, view, applyReading, lineById, refresh, onIdle, undo, redo, lib: () => lib, openNotebook, closeNotebook, makePdf, insertPages, deletePages, duplicatePages, currentPage, goToPage };
 })();
 })();

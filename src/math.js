@@ -243,6 +243,8 @@ const MathEngine = (() => {
     if (n.t === 'fn') {
       const args = n.a.map(simplify);
       if (n.n === 'ln' && args[0].t === 'const' && args[0].n === 'e') return N(1);
+      if (n.n === 'sqrt' && args[0].t === 'num' && args[0].v >= 0 && Number.isInteger(Math.sqrt(args[0].v))) return N(Math.sqrt(args[0].v));
+      if (n.n === 'ln' && args[0].t === 'num' && args[0].v === 1) return N(0);
       if ((n.n === 'ln' || n.n === 'log') && isNum(args[0], 1)) return N(0);
       return { t: 'fn', n: n.n, a: args };
     }
@@ -275,6 +277,7 @@ const MathEngine = (() => {
         if (isNum(a, 0)) return simplify({ t: 'neg', a: b });
         if (b.t === 'neg') return simplify({ t: 'op', o: '+', a, b: b.a });
         if (b.t === 'num' && b.v < 0) return { t: 'op', o: '+', a, b: N(-b.v) };
+        if (b.t === 'op' && b.o === '*' && b.a.t === 'num' && b.a.v < 0) return simplify({ t: 'op', o: '+', a, b: { t: 'op', o: '*', a: N(-b.a.v), b: b.b } });
         if (eq(a, b)) return N(0);
         return { t: 'op', o, a, b };
       case '*':
@@ -504,18 +507,322 @@ function expandFnCalls(src, fns, depth = 0) {
   return changed ? out + s.slice(last) : s;
 }
 
+/* ===== Calculus written by hand: derivatives, integrals, limits =====
+   The reader writes them as diff(e, x), d/dx(e), f'(x), f''(2), f_x(1, 2), int(e, x), int(e, x, a, b),
+   lim(e, x, a), liml / limr (from the left / right), lim(e, (x, y), (a, b)). They are worked out here and
+   replaced by plain math: a formula (2*x) or a number (1/3), so the rest of the app treats them like any line. */
+const Calc = (() => {
+  const ME = MathEngine, N = v => ({ t: 'num', v }), op = (o, a, b) => ({ t: 'op', o, a, b }), fn = (n, a) => ({ t: 'fn', n, a: [a] }), neg = a => ({ t: 'neg', a });
+  const V = n => ({ t: 'var', n });
+  const S = n => { let s = ME.simplify(n); for (let i = 0; i < 3; i++) s = ME.simplify(s); return s; };
+  const has = (n, v) => ME.freeVars(n).has(v);
+  const fail = () => new Error('No formula found');
+  // run a compiled expression with named values (x, y, t, θ, z go by position; any other letter by name)
+  const run = (g, vals) => g(vals, vals.x, vals.y, vals.t, vals['θ'], vals.z);
+  const isE = n => n.t === 'const' && n.n === 'e';
+  const lin = (u, v) => { try { const a = ME.derivative(u, v); return has(a, v) ? null : a; } catch (e) { return null; } };
+  function polyDeg(n, v) { let d = n; for (let k = 0; k <= 8; k++) { if (!has(d, v)) return k; try { d = ME.derivative(d, v); } catch (e) { return -1; } } return -1; }
+  // c·v^k terms with numeric c and k (polynomials, 1/x², √x …), or null
+  function mono(n, v) {
+    const one = (k, c) => new Map([[k, c]]);
+    const add = (A, B, sg) => { const M = new Map(A); for (const [k, c] of B) M.set(k, (M.get(k) || 0) + sg * c); return M; };
+    const mul = (A, B) => { const M = new Map(); for (const [i, a] of A) for (const [j, b] of B) M.set(i + j, (M.get(i + j) || 0) + a * b); return M; };
+    switch (n.t) {
+      case 'num': return one(0, n.v);
+      case 'const': return one(0, n.n === 'π' ? Math.PI : Math.E);
+      case 'var': return n.n === v ? one(1, 1) : null;
+      case 'group': return mono(n.a, v);
+      case 'neg': { const A = mono(n.a, v); return A && add(new Map(), A, -1); }
+      case 'op': {
+        const A = mono(n.a, v); if (!A) return null;
+        if (n.o === '^') { if (n.b.t !== 'num') return null; const e = n.b.v; if (A.size === 1) { const [[k, c]] = [...A]; if (c < 0 && !Number.isInteger(e)) return null; return one(k * e, Math.pow(c, e)); } if (Number.isInteger(e) && e >= 0 && e <= 8) { let M = one(0, 1); for (let i = 0; i < e; i++) M = mul(M, A); return M; } return null; }
+        const B = mono(n.b, v); if (!B) return null;
+        if (n.o === '+' || n.o === '-') return add(A, B, n.o === '+' ? 1 : -1);
+        if (n.o === '*') return mul(A, B);
+        if (n.o === '/') { if (B.size !== 1) return null; const [[k, c]] = [...B]; if (!c) return null; return mul(A, one(-k, 1 / c)); }
+        return null;
+      }
+      case 'fn': if (n.n === 'sqrt') { const A = mono(n.a[0], v); if (A && A.size === 1) { const [[k, c]] = [...A]; if (c >= 0) return one(k / 2, Math.sqrt(c)); } } return null;
+    }
+    return null;
+  }
+  function I(n, v, depth = 0) {
+    if (depth > 14) throw fail();
+    n = S(n);
+    if (!has(n, v)) return op('*', n, V(v));
+    const M = mono(n, v);
+    if (M) {
+      let out = null;
+      for (const [k, c] of [...M].sort((a, b) => b[0] - a[0])) {
+        if (!c) continue;
+        const t = Math.abs(k + 1) < 1e-12 ? op('*', N(c), fn('ln', fn('abs', V(v)))) : op('*', N(c / (k + 1)), op('^', V(v), N(k + 1)));
+        out = out ? op('+', out, t) : t;
+      }
+      return out || N(0);
+    }
+    switch (n.t) {
+      case 'neg': return neg(I(n.a, v, depth + 1));
+      case 'group': return I(n.a, v, depth);
+      case 'op': {
+        const { a, b, o } = n;
+        if (o === '+' || o === '-') return op(o, I(a, v, depth + 1), I(b, v, depth + 1));
+        if (o === '*') {
+          if (!has(a, v)) return op('*', a, I(b, v, depth + 1));
+          if (!has(b, v)) return op('*', b, I(a, v, depth + 1));
+          // p·ln(u): the logarithm is the part to differentiate
+          for (const [p, g] of [[a, b], [b, a]]) if (g.t === 'fn' && g.n === 'ln' && polyDeg(p, v) >= 0) { const A = lin(g.a[0], v); if (A) { const P = I(p, v, depth + 1); return op('-', op('*', P, g), I(op('/', op('*', P, A), g.a[0]), v, depth + 1)); } }
+          // by parts, differentiating the polynomial factor until it's gone
+          for (const [p, g] of [[a, b], [b, a]]) { const dg = polyDeg(p, v); if (dg > 0 && dg <= 6) { try { const G = I(g, v, depth + 1); return op('-', op('*', p, G), I(op('*', ME.derivative(p, v), G), v, depth + 1)); } catch (e) { } } }
+          throw fail();
+        }
+        if (o === '/') {
+          if (!has(b, v)) return op('/', I(a, v, depth + 1), b);
+          if (!has(a, v)) {
+            const A = lin(b, v); if (A) return op('*', op('/', a, A), fn('ln', fn('abs', b)));
+            if (b.t === 'op' && b.o === '+') for (const [c, w] of [[b.a, b.b], [b.b, b.a]]) if (!has(c, v) && w.t === 'op' && w.o === '^' && w.b.t === 'num' && w.b.v === 2) { const A2 = lin(w.a, v); if (A2) { const r = fn('sqrt', c); return op('*', op('/', a, op('*', A2, r)), fn('atan', op('/', w.a, r))); } }
+            if (b.t === 'fn' && b.n === 'sqrt') { const q = b.a[0]; if (q.t === 'op' && q.o === '-' && !has(q.a, v) && q.b.t === 'op' && q.b.o === '^' && q.b.b.t === 'num' && q.b.b.v === 2) { const A2 = lin(q.b.a, v); if (A2) return op('*', op('/', a, A2), fn('asin', op('/', q.b.a, fn('sqrt', q.a)))); } return I(op('*', a, op('^', q, N(-0.5))), v, depth + 1); }
+            if (b.t === 'op' && b.o === '^' && !has(b.b, v)) return I(op('*', a, op('^', b.a, neg(b.b))), v, depth + 1);
+          }
+          if (b.t === 'var' || (b.t === 'op' && b.o === '^' && !has(b.b, v))) return I(op('*', a, b.t === 'var' ? op('^', b, N(-1)) : op('^', b.a, neg(b.b))), v, depth + 1);
+          throw fail();
+        }
+        if (o === '^') {
+          if (!has(b, v)) {
+            if (a.t === 'fn' && b.t === 'num' && b.v === 2) { const A = lin(a.a[0], v); if (A && a.n === 'sec') return op('/', fn('tan', a.a[0]), A); if (A && a.n === 'csc') return neg(op('/', fn('cot', a.a[0]), A)); }
+            const A = lin(a, v);
+            if (!A) { if (b.t === 'num' && Number.isInteger(b.v) && b.v >= 2 && b.v <= 6) { let e = a; for (let i = 1; i < b.v; i++) e = op('*', e, a); return I(e, v, depth + 1); } throw fail(); }
+            if (b.t === 'num' && b.v === -1) return op('/', fn('ln', fn('abs', a)), A);
+            const n1 = S(op('+', b, N(1))); return op('/', op('^', a, n1), op('*', A, n1));
+          }
+          if (!has(a, v)) { const A = lin(b, v); if (!A) throw fail(); return op('/', n, isE(a) ? A : op('*', A, fn('ln', a))); }
+          throw fail();
+        }
+        break;
+      }
+      case 'fn': {
+        const u = n.a[0], A = lin(u, v); if (!A) throw fail();
+        const R = r => op('/', r, A);
+        switch (n.n) {
+          case 'sin': return R(neg(fn('cos', u)));
+          case 'cos': return R(fn('sin', u));
+          case 'exp': return R(n);
+          case 'tan': return R(neg(fn('ln', fn('abs', fn('cos', u)))));
+          case 'sec': return R(fn('ln', fn('abs', op('+', fn('sec', u), fn('tan', u)))));
+          case 'sinh': return R(fn('cosh', u));
+          case 'cosh': return R(fn('sinh', u));
+          case 'ln': return R(op('-', op('*', u, fn('ln', u)), u));
+          case 'sqrt': return R(op('*', N(2 / 3), op('^', u, N(1.5))));
+        }
+        throw fail();
+      }
+    }
+    throw fail();
+  }
+  // a formula is only kept if its derivative really gives back the integrand (checked at a few points)
+  const PROBE = [0.37, 1.13, 1.71, 2.29, 0.61];
+  function checked(F, f, v) {
+    const dF = ME.compile(ME.derivative(F, v)), g = ME.compile(f), others = [...new Set([...ME.freeVars(f), ...ME.freeVars(F)])].filter(x => x !== v);
+    let ok = 0;
+    for (let i = 0; i < PROBE.length; i++) {
+      const sc = {}; others.forEach((o, j) => { sc[o] = 0.83 + 0.29 * j + 0.11 * i; }); sc[v] = PROBE[i];
+      let a, b; try { a = run(dF, sc); b = run(g, sc); } catch (e) { continue; }
+      if (!isFinite(a) || !isFinite(b)) continue;
+      if (Math.abs(a - b) > 1e-6 * Math.max(1, Math.abs(b))) return false;
+      ok++;
+    }
+    return ok >= 2;
+  }
+  function antiderivative(f, v) { const F = S(I(f, v)); if (!checked(F, f, v)) throw fail(); return F; }
+  const subst = (node, v, by) => {
+    const walk = n => { if (!n || typeof n !== 'object') return n; if (n.t === 'var' && n.n === v) return by; const o = Array.isArray(n) ? [] : {}; for (const k in n) o[k] = Array.isArray(n[k]) ? n[k].map(walk) : (n[k] && typeof n[k] === 'object' ? walk(n[k]) : n[k]); return o; };
+    return walk(node);
+  };
+  // numbers come out as the cleanest form: 1/3, 3*pi/4, 1/0 (∞)
+  function numText(x) {
+    if (x === Infinity) return '(1/0)';
+    if (x === -Infinity) return '(-1/0)';
+    if (!isFinite(x)) return '(0/0)';
+    if (Math.abs(x) < 1e-12) return '0';
+    const frac = y => { for (let q = 1; q <= 400; q++) { const p = Math.round(y * q); if (Math.abs(p / q - y) < 1e-9 * Math.max(1, Math.abs(y))) return [p, q]; } return null; };
+    let r = frac(x); if (r) return r[1] === 1 ? `(${r[0]})` : `(${r[0]}/${r[1]})`;
+    r = frac(x / Math.PI); if (r && r[1] <= 12 && Math.abs(r[0]) <= 24) return `(${r[0] === 1 ? '' : r[0] === -1 ? '-' : r[0] + '*'}pi${r[1] === 1 ? '' : '/' + r[1]})`;
+    return '(' + String(+x.toPrecision(12)) + ')';
+  }
+  const bound = t => { const s = t.replace(/\s+/g, ''); if (/^\+?(inf|∞|infinity)$/i.test(s)) return Infinity; if (/^-(inf|∞|infinity)$/i.test(s)) return -Infinity; return null; };
+  // numeric limit of a one-variable function at a (±∞ allowed), from one side or both
+  function limit1(g, a, side, ctx) {
+    const seq = s => { const out = []; for (let k = 2; k <= 8; k++) { const h = Math.pow(10, -k), x = a === Infinity ? Math.pow(10, k) : a === -Infinity ? -Math.pow(10, k) : a + s * h; let y; try { y = g(x); } catch (e) { y = NaN; } out.push(y); } return out; };
+    const settle = ys => {
+      const f = ys.filter(y => !isNaN(y)); if (f.length < 3) return NaN;
+      const t = f.slice(-4);
+      const grows = t.every((y, i) => !i || Math.abs(y) > 2.5 * Math.abs(t[i - 1])) && Math.abs(t[t.length - 1]) > 1e4;
+      if ((grows || t.every(y => y > 1e7)) && t.every(y => y > 0)) return Infinity;
+      if ((grows || t.every(y => y < -1e7)) && t.every(y => y < 0)) return -Infinity;
+      const L = t[t.length - 1], spread = Math.max(...t.slice(-3)) - Math.min(...t.slice(-3));
+      if (!isFinite(L) || spread > 1e-3 * Math.max(1, Math.abs(L))) return NaN;
+      return Math.abs(L - Math.round(L)) < 1e-6 ? Math.round(L) : L;
+    };
+    if (!isFinite(a)) return settle(seq(1));
+    const R = side >= 0 ? settle(seq(1)) : null, L = side <= 0 ? settle(seq(-1)) : null;
+    if (side > 0) return R;
+    if (side < 0) return L;
+    const same = (p, q) => (p === q) || (isFinite(p) && isFinite(q) && Math.abs(p - q) < 1e-5 * Math.max(1, Math.abs(p)));
+    if (same(L, R)) return R;
+    if (ctx) ctx.note = `from the left it goes to ${ME.fmt(L)}, from the right to ${ME.fmt(R)}`;
+    return NaN;
+  }
+  // two variables: the limit has to agree along every path tried (lines, a parabola)
+  function limit2(g, a, b, ctx) {
+    const paths = [[1, 0], [0, 1], [1, 1], [1, -1], [1, 2], [2, -1], ['p', 1]];
+    let val = null;
+    for (const [m, k] of paths) {
+      const h = m === 'p' ? t => g(a + t, b + t * t) : t => g(a + m * t, b + k * t);
+      let probe = 0; for (let k = 2; k <= 8; k++) { let y; try { y = h(Math.pow(10, -k)); } catch (e) { y = NaN; } if (!isNaN(y)) probe++; }
+      if (!probe) continue;   // the function isn't defined along this path (y = x for (x² − y²)/(x − y))
+      const L = limit1(h, 0, 0);
+      if (isNaN(L)) { if (ctx) ctx.note = 'it has no single value along one of the paths'; return NaN; }
+      if (val === null) val = L;
+      else if (!(val === L || (isFinite(val) && isFinite(L) && Math.abs(val - L) < 1e-5 * Math.max(1, Math.abs(val))))) { if (ctx) ctx.note = `along different paths it goes to ${ME.fmt(val)} and ${ME.fmt(L)}`; return NaN; }
+    }
+    return val;
+  }
+  const evalNum = t => { const v = ME.compile(ME.parse(t))({}, 0); if (!isFinite(v)) throw new Error('A bound must be a number'); return v; };
+  // formulas as written by hand: x^3/3 instead of 0.3333*x^3, no spaces
+  // (fifths and tenths stay decimals: 9.8t, not 49t/5)
+  function frac(y) { for (let q = 1; q <= 100; q++) { if (q % 5 === 0) continue; const p = Math.round(y * q); if (Math.abs(p / q - y) < 1e-9 * Math.max(1, Math.abs(y))) return [p, q]; } return null; }
+  function tidy(n) {
+    if (!n || typeof n !== 'object') return n;
+    if (n.t === 'op' && n.o === '*' && n.a.t === 'num' && !Number.isInteger(n.a.v)) { const r = frac(n.a.v); if (r) { const top = Math.abs(r[0]) === 1 ? tidy(n.b) : op('*', N(Math.abs(r[0])), tidy(n.b)), q = op('/', top, N(r[1])); return r[0] < 0 ? neg(q) : q; } }
+    if (n.t === 'num' && !Number.isInteger(n.v)) { const r = frac(n.v); if (r && r[1] <= 100) return r[0] < 0 ? neg(op('/', N(-r[0]), N(r[1]))) : op('/', N(r[0]), N(r[1])); }
+    const o = Array.isArray(n) ? [] : {}; for (const k in n) o[k] = Array.isArray(n[k]) ? n[k].map(tidy) : (n[k] && typeof n[k] === 'object' ? tidy(n[k]) : n[k]); return o;
+  }
+  const text = n => ME.toText(tidy(n)).replace(/\s+/g, '').replace(/\+-/g, '-').replace(/-\(-/g, '+(');
+  return { antiderivative, subst, numText, bound, limit1, limit2, S, has, evalNum, V, op, run, text, frac };
+})();
+const CALC_RE = /(diff|int|liml|limr|lim)\s*\(|[a-zA-Z]'+\s*\(|[a-zA-Z]_[a-z]+\s*\(|\bd\s*\^?\s*\d*\s*\/\s*d\s*[a-z]/;
+function calcExpand(src, fns, ctx, depth = 0) {
+  const ME = MathEngine;
+  if (depth > 8) throw new Error('Too deeply nested');
+  let s = String(src).replace(/[′’]/g, "'").replace(/″/g, "''").replace(/∞/g, 'inf').replace(/∂/g, 'd');
+  // d/dx(…), d^2/dx^2(…) → diff(…, x, x)
+  for (let guard = 0; guard < 12; guard++) {
+    const m = s.match(/\bd\s*\^?\s*(\d*)\s*\/\s*d\s*([a-z])\s*\^?\s*\d*\s*\(/); if (!m) break;
+    const i = m.index, open = i + m[0].length - 1; let d = 0, j = open;
+    for (; j < s.length; j++) { if (s[j] === '(') d++; else if (s[j] === ')' && --d === 0) break; }
+    if (j >= s.length) throw new Error('A "(" is missing its ")"');
+    s = s.slice(0, i) + 'diff(' + s.slice(open + 1, j) + ', ' + Array(Math.max(1, +m[1] || 1)).fill(m[2]).join(', ') + ')' + s.slice(j + 1);
+  }
+  const head = /(diff|int|liml|limr|lim)\s*\(|([a-zA-Z])('+)\s*\(|([a-zA-Z])_([a-z]+)\s*\(/g;
+  let out = '', last = 0, m;
+  while ((m = head.exec(s))) {
+    const i = m.index;
+    if (i > 0 && /[a-zA-Z]/.test(s[i - 1])) continue;   // part of a longer name
+    const open = i + m[0].length - 1; let d = 0, j = open;
+    for (; j < s.length; j++) { if (s[j] === '(') d++; else if (s[j] === ')' && --d === 0) break; }
+    if (j >= s.length) throw new Error('A "(" is missing its ")"');
+    const raw = ME.splitTop(s.slice(open + 1, j), ',').map(a => a.trim());
+    const prep = a => expandFnCalls(calcExpand(a, fns, ctx, depth + 1), fns);
+    let rep;
+    if (m[1] === 'diff') {
+      if (raw.length < 2) throw new Error('Write the variable too: diff(…, x)');
+      let node = ME.parse(prep(raw[0])), lastV = null;
+      for (const a of raw.slice(1)) {
+        if (/^\d+$/.test(a)) { for (let k = 1; k < +a; k++) node = ME.derivative(node, lastV); continue; }
+        if (!/^[a-zθ]$/.test(a)) throw new Error('Differentiate with respect to a letter, like x');
+        node = ME.derivative(node, a); lastV = a;
+      }
+      rep = '(' + ME.toText(Calc.S(node)) + ')'; ctx.calc = ctx.calc || 'derivative';
+    } else if (m[1] === 'int') {
+      if (raw.length !== 2 && raw.length !== 4) throw new Error('An integral needs its variable, and both bounds for a definite one');
+      const v = raw[1]; if (!/^[a-zθ]$/.test(v)) throw new Error('Integrate with respect to a letter, like x');
+      const f = ME.parse(prep(raw[0]));
+      let F = null; try { F = Calc.antiderivative(f, v); } catch (e) { F = null; }
+      if (raw.length === 2) { if (!F) throw new Error('No formula found for this integral (a definite one, with bounds, can still be worked out)'); rep = '(' + ME.toText(F) + ')'; ctx.calc = 'integral'; ctx.plusC = true; }
+      else {
+        const [A, B] = [raw[2], raw[3]].map(t => { const b = Calc.bound(t); return b != null ? b : null; });
+        const atB = (t, inf) => {
+          if (inf != null) {   // F at ±∞: its limit
+            if (!F) throw new Error('No formula found for this integral');
+            const others = [...ME.freeVars(F)].filter(x => x !== v); if (others.length) throw new Error('An infinite bound needs a numeric integrand');
+            const g = ME.compile(F), L = Calc.limit1(x => Calc.run(g, { [v]: x }), inf, 0); if (!isFinite(L)) throw new Error('This integral diverges');
+            return { t: 'num', v: L };
+          }
+          return Calc.subst(F, v, ME.parse(prep(t)));
+        };
+        if (F) {
+          const val = Calc.S(Calc.op('-', atB(raw[3], B), atB(raw[2], A)));
+          const fv = ME.freeVars(val);
+          rep = fv.size ? '(' + ME.toText(val) + ')' : Calc.numText(ME.compile(val)({}, 0));
+        } else {
+          const others = [...ME.freeVars(f)].filter(x => x !== v);
+          if (others.length || A != null || B != null) throw new Error('No formula found for this integral');
+          const a = Calc.evalNum(prep(raw[2])), b = Calc.evalNum(prep(raw[3])), g = ME.compile(f);
+          const val = ME.simpson(x => Calc.run(g, { [v]: x }), a, b, 4000);
+          if (!isFinite(val)) throw new Error('This integral has no finite value');
+          rep = Calc.numText(val);
+        }
+        ctx.calc = 'integral';
+      }
+    } else if (m[1] === 'lim' || m[1] === 'liml' || m[1] === 'limr') {
+      if (raw.length < 3) throw new Error('Write the limit as lim(…, x, a)');
+      const side = m[1] === 'liml' ? -1 : m[1] === 'limr' ? 1 : 0;
+      const f = ME.compile(ME.parse(prep(raw[0])));
+      const tv = raw[1].replace(/[()\s]/g, '').split(','), tp = ME.splitTop(raw[2].replace(/^\(|\)$/g, ''), ',').map(t => t.trim());
+      let L;
+      if (tv.length === 2) {
+        const a = Calc.evalNum(prep(tp[0])), b = Calc.evalNum(prep(tp[1] || '0'));
+        L = Calc.limit2((x, y) => Calc.run(f, { [tv[0]]: x, [tv[1]]: y }), a, b, ctx);
+      } else {
+        const v = tv[0], inf = Calc.bound(raw[2]), a = inf != null ? inf : Calc.evalNum(prep(raw[2]));
+        L = Calc.limit1(x => Calc.run(f, { [v]: x }), a, side, ctx);
+      }
+      if (isNaN(L)) ctx.dne = true;
+      rep = Calc.numText(L); ctx.calc = 'limit';
+    } else if (m[3]) {   // f'(…), f''(…)
+      const F = fns[m[2]]; if (!F) throw new Error(`Define ${m[2]} first, like ${m[2]}(x) = …`);
+      if (F.vars.length !== 1) throw new Error(`${m[2]} has ${F.vars.length} variables: write ${m[2]}_${F.vars[0]} or ${m[2]}_${F.vars[1]}`);
+      let node = ME.parse(expandFnCalls(calcExpand(F.body, fns, ctx, depth + 1), fns));
+      for (let k = 0; k < m[3].length; k++) node = ME.derivative(node, F.vars[0]);
+      if (raw.length !== 1) throw new Error(`${m[2]}${m[3]} takes one value`);
+      rep = '(' + substVars(ME.toText(Calc.S(node)), F.vars, [prep(raw[0])]) + ')'; ctx.calc = ctx.calc || 'derivative';
+    } else {   // f_x(…), f_xy(…)
+      const F = fns[m[4]]; if (!F) { continue; }
+      const order = m[5].split(''); if (order.some(v => !F.vars.includes(v))) throw new Error(`${m[4]} is a function of ${F.vars.join(', ')}`);
+      let node = ME.parse(expandFnCalls(calcExpand(F.body, fns, ctx, depth + 1), fns));
+      for (const v of order) node = ME.derivative(node, v);
+      if (raw.length !== F.vars.length) throw new Error(`${m[4]}_${m[5]} takes ${F.vars.length} values`);
+      rep = '(' + substVars(ME.toText(Calc.S(node)), F.vars, raw.map(prep)) + ')'; ctx.calc = ctx.calc || 'derivative';
+    }
+    out += s.slice(last, i) + rep; last = j + 1; head.lastIndex = j + 1;
+  }
+  return out + s.slice(last);
+}
+
 /* ===== Statement analysis: decides graph type / arithmetic / solve ===== */
 function analyzeStatement(rawExpr, fns) {
   const ME = MathEngine;
   const src0 = ME.normalize(rawExpr);
   const def = parseFnDef(src0);
   let src = src0;
+  // functions defined on other lines, then derivatives, integrals and limits: worked out and replaced by their results
+  const calc = {};
   try {
     const others = {}; for (const k in fns || {}) if (!def || k !== def.name) others[k] = fns[k];
-    if (Object.keys(others).length) src = def ? src0.slice(0, src0.indexOf('=') + 1) + ' ' + expandFnCalls(def.body, others) : expandFnCalls(src0, others);
+    const k0 = def ? src0.indexOf('=') + 1 : 0;
+    let body = src0.slice(k0);
+    for (let it = 0; it < 4; it++) {
+      if (CALC_RE.test(body)) body = calcExpand(body, others, calc);
+      const nb = Object.keys(others).length ? expandFnCalls(body, others) : body;
+      if (nb === body) break;
+      body = nb;
+    }
+    if (k0) body = ' ' + body.trim();
+    src = src0.slice(0, k0) + body;
+    if (src.replace(/\s+/g, '') === src0.replace(/\s+/g, '')) src = src0;
   } catch (e) { return { src: src0, kind: 'error', error: e.message }; }
   const res = { src, kind: 'unknown' };
   if (src !== src0) { res.expanded = true; res.orig = src0; }
+  if (calc.calc) { res.calc = calc.calc; if (calc.dne) res.dne = calc.note || true; if (calc.plusC) res.plusC = true; }
   // a definition in other letters is graphed in x (and y): f(t) = t² → y = x², shown as f(t) = t²
   if (def && !(def.vars.length === 1 && def.vars[0] === 'x') && !(def.vars.length === 2 && def.vars[0] === 'x' && def.vars[1] === 'y')) {
     const body = src.slice(src.indexOf('=') + 1);
@@ -574,7 +881,17 @@ function analyzeStatement(rawExpr, fns) {
       // Arithmetic with trailing "="
       const lhs = ME.parse(sides[0]);
       const fv = [...ME.freeVars(lhs)];
-      if (fv.some(v => ['x', 'y', 'z', 'r', 't', 'θ'].includes(v))) { res.kind = 'incomplete'; return res; }
+      if (fv.some(v => ['x', 'y', 'z', 'r', 't', 'θ'].includes(v))) {
+        // "f'(x) =", "d/dx(x³) =", "∫ x² dx =": the answer is a formula, written after the "=" (and it can be graphed)
+        if (res.expanded) {
+          const node = Calc.S(lhs), vs = ME.freeVars(node);
+          res.answer = Calc.text(node) + (res.plusC ? '+C' : ''); res.name = res.orig.split('=')[0].trim(); res.f = node;
+          if (!vs.has('y') && !vs.has('z')) { res.kind = 'function'; addParams(node, ['x']); res.params = [...params]; return res; }
+          if (!vs.has('z')) { res.kind = 'surface'; addParams(node, ['x', 'y']); res.params = [...params]; return res; }
+          res.kind = 'formula'; res.params = []; return res;
+        }
+        res.kind = 'incomplete'; return res;
+      }
       res.kind = 'evaluate'; res.lhs = lhs; fv.forEach(v => params.add(v)); res.params = [...params]; return res;
     }
     if (sides.length === 1) {
