@@ -272,6 +272,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .lm-seg button { flex: 1; min-height: 36px; border: 0; background: transparent; font: 600 12.5px var(--font); color: var(--ink); cursor: pointer; }
 .lm-seg button + button { border-left: 1px solid var(--rule); }
 .lm-seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.lm-wrt { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+.lm-wrt button { min-width: 64px; min-height: 44px; padding: 0 14px; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); font: 17px var(--math); color: var(--ink); cursor: pointer; }
+.lm-wrt button:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
+.lm-dbl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; font: 15px var(--math); color: var(--ink); }
+.lm-dbl input { width: 48px; height: 36px; border: 1px solid #d3ddd9; border-radius: 5px; text-align: center; font: 15px var(--mono); color: #161c1a; background: #fff; -webkit-user-select: text; user-select: text; }
+.lm-dbl .lm-seg { margin: 0; }
+.lm-dbl .rg { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; margin-right: 8px; }
+.lm-dbl .lm-seg button { min-height: 36px; padding: 0 10px; font: 14px var(--math); }
+.lm-dbl button.primary { height: 36px; padding: 0 14px; border: 0; border-radius: 5px; background: var(--accent); color: #fff; font: 600 13px var(--font); cursor: pointer; }
+.lm-link { border: 0; background: none; padding: 0; color: var(--accent); font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
 .lm-sec .sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
 .gfit-r { font: 11px var(--mono); color: #7d8884; }
 .table-edit textarea { flex: 1 1 100%; min-height: 64px; border: 1px solid #d3ddd9; border-radius: 5px; padding: 8px 10px; font: 14px/1.5 var(--mono); color: #161c1a; background: #fff; resize: vertical; -webkit-user-select: text; user-select: text; }

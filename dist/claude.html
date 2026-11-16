@@ -272,6 +272,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .lm-seg button { flex: 1; min-height: 36px; border: 0; background: transparent; font: 600 12.5px var(--font); color: var(--ink); cursor: pointer; }
 .lm-seg button + button { border-left: 1px solid var(--rule); }
 .lm-seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.lm-wrt { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+.lm-wrt button { min-width: 64px; min-height: 44px; padding: 0 14px; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); font: 17px var(--math); color: var(--ink); cursor: pointer; }
+.lm-wrt button:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
+.lm-dbl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; font: 15px var(--math); color: var(--ink); }
+.lm-dbl input { width: 48px; height: 36px; border: 1px solid #d3ddd9; border-radius: 5px; text-align: center; font: 15px var(--mono); color: #161c1a; background: #fff; -webkit-user-select: text; user-select: text; }
+.lm-dbl .lm-seg { margin: 0; }
+.lm-dbl .rg { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; margin-right: 8px; }
+.lm-dbl .lm-seg button { min-height: 36px; padding: 0 10px; font: 14px var(--math); }
+.lm-dbl button.primary { height: 36px; padding: 0 14px; border: 0; border-radius: 5px; background: var(--accent); color: #fff; font: 600 13px var(--font); cursor: pointer; }
+.lm-link { border: 0; background: none; padding: 0; color: var(--accent); font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
 .lm-sec .sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
 .gfit-r { font: 11px var(--mono); color: #7d8884; }
 .table-edit textarea { flex: 1 1 100%; min-height: 64px; border: 1px solid #d3ddd9; border-radius: 5px; padding: 8px 10px; font: 14px/1.5 var(--mono); color: #161c1a; background: #fff; resize: vertical; -webkit-user-select: text; user-select: text; }
@@ -1402,7 +1412,17 @@ const Calc = (() => {
     if (n.t === 'num' && !Number.isInteger(n.v)) { const r = frac(n.v); if (r && r[1] <= 100) return r[0] < 0 ? neg(op('/', N(-r[0]), N(r[1]))) : op('/', N(r[0]), N(r[1])); }
     const o = Array.isArray(n) ? [] : {}; for (const k in n) o[k] = Array.isArray(n[k]) ? n[k].map(tidy) : (n[k] && typeof n[k] === 'object' ? tidy(n[k]) : n[k]); return o;
   }
-  const text = n => ME.toText(tidy(n)).replace(/\s+/g, '').replace(/\+-/g, '-').replace(/-\(-/g, '+(');
+  // (x²/2)·y² → x²y²/2: the fraction bar goes last, so the handwriting can't be read as x²/(2y²)
+  function divLast(n) {
+    if (!n || typeof n !== 'object') return n;
+    const o = Array.isArray(n) ? [] : {}; for (const k in n) o[k] = Array.isArray(n[k]) ? n[k].map(divLast) : (n[k] && typeof n[k] === 'object' ? divLast(n[k]) : n[k]);
+    if (o.t === 'op' && o.o === '*') {
+      if (o.a.t === 'op' && o.a.o === '/' && o.a.b.t === 'num') return op('/', divLast(op('*', o.a.a, o.b)), o.a.b);
+      if (o.b.t === 'op' && o.b.o === '/' && o.b.b.t === 'num') return op('/', divLast(op('*', o.a, o.b.a)), o.b.b);
+    }
+    return o;
+  }
+  const text = n => ME.toText(divLast(tidy(n))).replace(/\s+/g, '').replace(/\+-/g, '-').replace(/-\(-/g, '+(');
   return { antiderivative, subst, numText, bound, limit1, limit2, S, has, evalNum, V, op, run, text, frac };
 })();
 const CALC_RE = /(diff|int|liml|limr|lim)\s*\(|[a-zA-Z]'+\s*\(|[a-zA-Z]_[a-z]+\s*\(|\bd\s*\^?\s*\d*\s*\/\s*d\s*[a-z]/;
@@ -1428,9 +1448,17 @@ function calcExpand(src, fns, ctx, depth = 0) {
     if (j >= s.length) throw new Error('A "(" is missing its ")"');
     const raw = ME.splitTop(s.slice(open + 1, j), ',').map(a => a.trim());
     const prep = a => expandFnCalls(calcExpand(a, fns, ctx, depth + 1), fns);
+    // the variable, when it wasn't written: the only one there is, or the one picked in the menu
+    const pick = (vars, op) => {
+      if (vars.length <= 1) return vars[0] || 'x';
+      ctx.pos = ctx.pos || 0; const w = (ctx.wrt || '')[ctx.pos];
+      if (w && vars.includes(w)) { ctx.pos++; return w; }
+      const e = new Error('Choose the variable'); e.choose = { vars, op, step: ctx.pos + 1, done: (ctx.wrt || '').slice(0, ctx.pos) }; throw e;
+    };
+    const varsOf = t => { const fv = ME.freeVars(ME.parse(t)); const vs = ['x', 'y', 'z', 't'].filter(v => fv.has(v)); return vs.length ? vs : ['x']; };
     let rep;
     if (m[1] === 'diff') {
-      if (raw.length < 2) throw new Error('Write the variable too: diff(…, x)');
+      if (raw.length < 2) { const e0 = prep(raw[0]); raw.push(pick(varsOf(e0), 'diff')); raw[0] = e0; }
       let node = ME.parse(prep(raw[0])), lastV = null;
       for (const a of raw.slice(1)) {
         if (/^\d+$/.test(a)) { for (let k = 1; k < +a; k++) node = ME.derivative(node, lastV); continue; }
@@ -1439,6 +1467,7 @@ function calcExpand(src, fns, ctx, depth = 0) {
       }
       rep = '(' + ME.toText(Calc.S(node)) + ')'; ctx.calc = ctx.calc || 'derivative';
     } else if (m[1] === 'int') {
+      if (raw.length === 1 || raw.length === 3) { const e0 = prep(raw[0]); raw.splice(1, 0, pick(varsOf(e0), 'int')); raw[0] = e0; }
       if (raw.length !== 2 && raw.length !== 4) throw new Error('An integral needs its variable, and both bounds for a definite one');
       const v = raw[1]; if (!/^[a-zθ]$/.test(v)) throw new Error('Integrate with respect to a letter, like x');
       const f = ME.parse(prep(raw[0]));
@@ -1486,11 +1515,11 @@ function calcExpand(src, fns, ctx, depth = 0) {
       rep = Calc.numText(L); ctx.calc = 'limit';
     } else if (m[3]) {   // f'(…), f''(…)
       const F = fns[m[2]]; if (!F) throw new Error(`Define ${m[2]} first, like ${m[2]}(x) = …`);
-      if (F.vars.length !== 1) throw new Error(`${m[2]} has ${F.vars.length} variables: write ${m[2]}_${F.vars[0]} or ${m[2]}_${F.vars[1]}`);
       let node = ME.parse(expandFnCalls(calcExpand(F.body, fns, ctx, depth + 1), fns));
-      for (let k = 0; k < m[3].length; k++) node = ME.derivative(node, F.vars[0]);
-      if (raw.length !== 1) throw new Error(`${m[2]}${m[3]} takes one value`);
-      rep = '(' + substVars(ME.toText(Calc.S(node)), F.vars, [prep(raw[0])]) + ')'; ctx.calc = ctx.calc || 'derivative';
+      // f'(x, y): a partial derivative; which variable is picked in the menu (f'' asks twice)
+      for (let k = 0; k < m[3].length; k++) node = ME.derivative(node, F.vars.length === 1 ? F.vars[0] : pick(F.vars, 'diff'));
+      if (raw.length !== F.vars.length) throw new Error(`${m[2]}${m[3]} takes ${F.vars.length} value${F.vars.length > 1 ? 's' : ''}`);
+      rep = '(' + substVars(ME.toText(Calc.S(node)), F.vars, raw.map(prep)) + ')'; ctx.calc = ctx.calc || 'derivative';
     } else {   // f_x(…), f_xy(…)
       const F = fns[m[4]]; if (!F) { continue; }
       const order = m[5].split(''); if (order.some(v => !F.vars.includes(v))) throw new Error(`${m[4]} is a function of ${F.vars.join(', ')}`);
@@ -1505,13 +1534,13 @@ function calcExpand(src, fns, ctx, depth = 0) {
 }
 
 /* ===== Statement analysis: decides graph type / arithmetic / solve ===== */
-function analyzeStatement(rawExpr, fns) {
+function analyzeStatement(rawExpr, fns, opts = {}) {
   const ME = MathEngine;
   const src0 = ME.normalize(rawExpr);
   const def = parseFnDef(src0);
   let src = src0;
   // functions defined on other lines, then derivatives, integrals and limits: worked out and replaced by their results
-  const calc = {};
+  const calc = { wrt: opts.wrt || '', pos: 0 };
   try {
     const others = {}; for (const k in fns || {}) if (!def || k !== def.name) others[k] = fns[k];
     const k0 = def ? src0.indexOf('=') + 1 : 0;
@@ -1525,8 +1554,13 @@ function analyzeStatement(rawExpr, fns) {
     if (k0) body = ' ' + body.trim();
     src = src0.slice(0, k0) + body;
     if (src.replace(/\s+/g, '') === src0.replace(/\s+/g, '')) src = src0;
-  } catch (e) { return { src: src0, kind: 'error', error: e.message }; }
+  } catch (e) {
+    // which variable? (f'(x, y), ∫ xy, …): the menu asks, one step at a time
+    if (e.choose) return { src: src0, kind: 'choose', choose: e.choose, params: [] };
+    return { src: src0, kind: 'error', error: e.message };
+  }
   const res = { src, kind: 'unknown' };
+  if (calc.wrt) res.wrt = calc.wrt.slice(0, calc.pos);
   if (src !== src0) { res.expanded = true; res.orig = src0; }
   if (calc.calc) { res.calc = calc.calc; if (calc.dne) res.dne = calc.note || true; if (calc.plusC) res.plusC = true; }
   // a definition in other letters is graphed in x (and y): f(t) = t² → y = x², shown as f(t) = t²
@@ -1729,6 +1763,7 @@ const HandFont = (() => {
     'N': { w: .64, s: [[[.07, 1], [.07, 0], [.55, 1], [.55, 0]]] },
     'E': { w: .54, s: [[[.48, 0], [.08, 0], [.08, 1], [.5, 1]], [[.08, .5], [.42, .5]]] },
     '∞': { w: .86, s: [[...arc(.23, .62, .19, .17, 0, 360, 20).map(([x, y]) => [x, y]), ...arc(.61, .62, .19, .17, 180, -180, 20)]] },
+    '∫': { w: .46, s: [[[.42, -.12], ...arc(.33, -.02, .09, .1, 0, -180, 8).map(([x, y]) => [x, y]), [.24, .3], [.2, .9], ...arc(.11, 1.04, .09, .1, 0, 180, 8)]] },
     '?': { w: .5, s: [[...arc(.24, .26, .2, .22, 200, 430, 12), [.24, .7]], dot(.24, .95)] },
   };
   function rng(seed) { let s = seed >>> 0 || 1; return () => { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; return ((s >>> 0) % 100000) / 100000; }; }
@@ -1767,9 +1802,10 @@ const HandFont = (() => {
     const R = rng(seed);
     const glyphs = [];
     let cx = x;
-    let sup = false, supLeft = 0, supEnd = -1;
+    let sup = false, supLeft = 0, supEnd = -1, sub = false;
     for (let i = 0; i < text.length; i++) {
       let ch = text[i];
+      if (sub && !/[a-z]/.test(ch)) sub = false;
       if (ch === ' ') { cx += h * 0.26; continue; }
       if (ch === '^' && text[i + 1] === '(') {   // ^( … ) : a whole group in superscript, brackets not drawn
         let d = 0, j = i + 1; for (; j < text.length; j++) { if (text[j] === '(') d++; else if (text[j] === ')' && --d === 0) break; }
@@ -1777,11 +1813,12 @@ const HandFont = (() => {
       }
       if (i === supEnd) { supEnd = -1; continue; }
       if (ch === '^') { sup = true; supLeft = 1; continue; }
+      if (ch === '_') { sub = true; continue; }
       const g = G[ch] || G['?'];
       const isSup = sup || i < supEnd;
       if (sup) { supLeft--; const nxt = text[i + 1]; if (!(nxt && /[0-9.]/.test(ch) && /[0-9.]/.test(nxt))) sup = false; }
-      const sc = (isSup ? 0.58 : 1) * h * (1 + (R() - 0.5) * 0.06);
-      const oy = y + (isSup ? -0.18 * h : 0) + (R() - 0.5) * 0.04 * h;
+      const sc = (isSup || sub ? 0.58 : 1) * h * (1 + (R() - 0.5) * 0.06);
+      const oy = y + (isSup ? -0.18 * h : sub ? 0.5 * h : 0) + (R() - 0.5) * 0.04 * h;
       const rot = (R() - 0.5) * 5 * D2R + 0.04;
       const ox = cx + (isSup ? 0.04 * h : 0);
       const strokes = g.s.map(st => {
@@ -1805,13 +1842,16 @@ const HandFont = (() => {
   function advance(text, h) {
     let w = 0;
     let sup = false, supEnd = -1;
+    let sub = false;
     for (let i = 0; i < text.length; i++) {
       const ch = text[i];
       if (ch === ' ') { w += h * 0.26; continue; }
       if (ch === '^' && text[i + 1] === '(') { let d = 0, j = i + 1; for (; j < text.length; j++) { if (text[j] === '(') d++; else if (text[j] === ')' && --d === 0) break; } supEnd = j; i++; continue; }
       if (i === supEnd) { supEnd = -1; continue; }
       if (ch === '^') { sup = true; continue; }
-      const g = G[ch] || G['?'], k = sup || i < supEnd ? 0.58 : 1;
+      if (ch === '_') { sub = true; continue; }
+      if (sub && !/[a-z]/.test(ch)) sub = false;
+      const g = G[ch] || G['?'], k = sup || sub || i < supEnd ? 0.58 : 1;
       if (sup && !(/[0-9.]/.test(ch) && /[0-9.]/.test(text[i + 1] || ''))) sup = false;
       w += g.w * h * k + h * 0.07;
     }
@@ -3218,10 +3258,10 @@ function collectUserFns(lines) {
 const callsUserFn = expr => { for (const n in userFns) if (expr.includes(n + '(') || expr.includes(n + ' (') || expr.includes(n + "'") || expr.includes(n + '_')) return true; return false; };
 function anOf(l) {
   if (l.layout === 'table') return tableAnalysis(l);
-  const key = l.expr && callsUserFn(l.expr) ? l.expr + '\u0000' + userFnSig : l.expr;
+  const key = (l.expr && callsUserFn(l.expr) ? l.expr + '\u0000' + userFnSig : l.expr) + (l.wrt ? '\u0001' + l.wrt : '');
   const c = anCache.get(l.id);
   if (c && c.expr === key) return c.an;
-  const an = l.expr ? analyzeStatement(l.expr, userFns) : { kind: 'none' };
+  const an = l.expr ? analyzeStatement(l.expr, userFns, { wrt: l.wrt || '' }) : { kind: 'none' };
   try {
     const C = {};
     if (an.kind === 'function') { C.f = ME.compile(an.f); try { an.df = ME.derivative(an.f, 'x'); C.df = ME.compile(an.df); } catch (e) { an.df = null; } }
@@ -4032,6 +4072,8 @@ async function readLineInner(id, l, ver, sampler, ctl) {
   markFresh(L); noteReadDone(true);
   maybeAutoGraph(L);
   refresh(); scheduleSave();
+  // a derivative or integral that doesn't say which variable: ask straight away
+  if (anOf(L).kind === 'choose' && !lmenu && !gesture) openLineMenu(L);
 }
 function applyReading(l, expr, clusters) {
   l.clusters = clusters;
@@ -4455,7 +4497,7 @@ function loopState(l) {
   if (l.status === 'ok' && !l.dirty) {
     const k = anOf(l).kind;
     if (k === 'incomplete') return null;
-    return k === 'error' || k === 'unknown' ? 'warn' : 'ok';
+    return k === 'error' || k === 'unknown' ? 'warn' : 'ok';   // ('choose' is read fine: it waits for a variable)
   }
   return ['error', 'notmath', 'new', 'idle', 'stale', 'unavailable'].includes(l.status) ? 'warn' : null;
 }
@@ -4573,7 +4615,7 @@ function litRoles(expr) {
 }
 
 let lmenu = null;
-const KIND_LABEL = { solid: 'Solid', function: 'Function', polar: 'Polar curve', parametric: 'Parametric curve', implicit: 'Curve', surface: 'Surface', curve3d: '3D curve', implicit3d: '3D surface', evaluate: 'Calculation', value: 'Calculation', check: 'Check', solve: 'Equation', assign: 'Variable', define: 'Function of x, y, z', data: 'Table', data3d: 'Table (x, y, z)' };
+const KIND_LABEL = { solid: 'Solid', function: 'Function', polar: 'Polar curve', parametric: 'Parametric curve', implicit: 'Curve', surface: 'Surface', curve3d: '3D curve', implicit3d: '3D surface', evaluate: 'Calculation', value: 'Calculation', check: 'Check', solve: 'Equation', assign: 'Variable', choose: 'Which variable?', define: 'Function of x, y, z', data: 'Table', data3d: 'Table (x, y, z)' };
 // what's written after a line's "=": a number (1/3, π/4 for calculus), ∞, DNE, or a formula (3x² − 2)
 function answerText(an) {
   if (an.answer) return exprToHand(an.answer);
@@ -4586,14 +4628,36 @@ function answerText(an) {
   }
   return ME.fmt(v).replace(/−/g, '-');
 }
+// calculus as it's written in a book: ∫₀¹ x² dx, ∂/∂x(…), lim x→0, f_x
+function calcHTML(t) {
+  const ME_ = ME;
+  let out = '', i = 0;
+  const head = /(diff|int|liml|limr|lim)\s*\(|([a-zA-Z])_([a-z]+)\s*\(/g;
+  let m;
+  while ((m = head.exec(t))) {
+    if (m.index > 0 && /[a-zA-Z]/.test(t[m.index - 1])) continue;
+    const open = m.index + m[0].length - 1; let d = 0, j = open;
+    for (; j < t.length; j++) { if (t[j] === '(') d++; else if (t[j] === ')' && --d === 0) break; }
+    if (j >= t.length) break;
+    const a = ME_.splitTop(t.slice(open + 1, j), ',').map(x => x.trim()), inner = x => calcHTML(x);
+    let h;
+    if (m[1] === 'int') h = a.length === 3 ? `∫<sub>${inner(a[1])}</sub><sup>${inner(a[2])}</sup> ${inner(a[0])}` : a.length >= 4 ? `∫<sub>${inner(a[2])}</sub><sup>${inner(a[3])}</sup> ${inner(a[0])} <i>d${esc(a[1])}</i>` : a.length === 2 ? `∫ ${inner(a[0])} <i>d${esc(a[1])}</i>` : `∫ ${inner(a[0])}`;
+    else if (m[1] === 'diff') h = a.length > 1 ? `∂/∂${a.slice(1).map(v => `<i>${esc(v)}</i>`).join(' ∂')} (${inner(a[0])})` : `∂(${inner(a[0])})`;
+    else if (m[1]) h = `lim<sub>${esc(a[1] || '')} → ${inner(a[2] || '').replace(/inf/g, '∞')}${m[1] === 'limr' ? '⁺' : m[1] === 'liml' ? '⁻' : ''}</sub> ${inner(a[0])}`;
+    else { out += prettyText(t.slice(i, m.index)) + `${esc(m[2])}<sub>${esc(m[3])}</sub>(${a.map(inner).join(', ')})`; i = j + 1; head.lastIndex = j + 1; continue; }
+    out += prettyText(t.slice(i, m.index)) + h; i = j + 1; head.lastIndex = j + 1;
+  }
+  return out + prettyText(t.slice(i));
+}
 const hasAnswer = (l, an) => l.layout !== 'column' && (an.kind === 'evaluate' || !!an.answer);
 const fnNameHTML = name => esc(name).replace(/\(([^)]*)\)/, (m, a) => '(' + a.split(',').map(v => `<i>${v.trim()}</i>`).join(', ') + ')');
 const prettyText = t => esc(t).replace(/\*/g, '·').replace(/\^2\b/g, '²').replace(/\^3\b/g, '³').replace(/-/g, '−');
 function lineMathHTML(l, an) {
   const show = n => ME.pp(n, an.vmap ? { varHtml: v => `<i>${esc(an.vmap[v] || v)}</i>` } : undefined);
   if (an.kind === 'data' || an.kind === 'data3d') return tableHTML(an);
-  if (an.expanded && (an.kind === 'evaluate' || an.kind === 'value')) return `${prettyText(an.orig.split('=')[0].trim())} = <b>${esc(answerText(an).replace(/-/g, '−'))}</b>`;
-  if (an.answer) return `${prettyText(an.name)} = ${show(an.f)}${an.plusC ? ' + <i>C</i>' : ''}`;
+  if (an.expanded && (an.kind === 'evaluate' || an.kind === 'value')) return `${calcHTML(an.orig.split('=')[0].trim())} = <b>${esc(answerText(an).replace(/-/g, '−'))}</b>`;
+  if (an.answer) return `${calcHTML(an.name)} = ${show(an.f)}${an.plusC ? ' + <i>C</i>' : ''}`;
+  if (an.kind === 'choose') return calcHTML(l.expr);
   switch (an.kind) {
     case 'define': return `${fnNameHTML(an.name)} = ${show(an.f)}`;
     case 'function': return `${an.name === 'y' ? '<i>y</i>' : fnNameHTML(an.name)} = ${show(an.f)}`;
@@ -4638,6 +4702,9 @@ function renderLineMenu() {
     if (isData) h += tableMenuHTML(l, an);
     if (an.dne) h += `<p class="lm-note">The limit doesn't exist${typeof an.dne === 'string' ? ': ' + esc(an.dne) : ''}.</p>`;
     if (an.calc === 'integral' && an.plusC) h += `<p class="lm-note">Plus any constant <i>C</i>. The graph shows <i>C</i> = 0.</p>`;
+    if (an.kind === 'choose') h += chooseHTML(an.choose);
+    else if (l.wrt) h += `<p class="lm-note">With respect to ${[...(an.wrt || l.wrt)].map(v => `<i>${esc(v)}</i>`).join(', then ')} · <button class="lm-link" data-a="rewrt">Change</button></p>`;
+    if (an.kind === 'surface' && !l.fitted && !l.virtual) h += partialsHTML(l, an);
     if (an.kind === 'define') h += `<p class="lm-note">A function of three variables can't be drawn, but any line can use it: ${fnNameHTML(an.name.replace(/\(.*\)/, '(' + an.vars.map((v, i) => i + 1).join(', ') + ')'))} =</p>`;
     if (l.traces && !(l.traces.x && l.traces.y)) h += `<p class="lm-note">Now draw how <i>z</i> changes along <i>${l.traces.x ? 'y' : 'x'}</i> to finish the surface.</p>`;
     // sliders: every number written in the line, plus free variables
@@ -4730,6 +4797,14 @@ $('#lineMenu').addEventListener('click', e => {
   if (a === 'close') { closeLineMenu(); return; }
   if (a === 'alt') { const alt = l.alts[Number(b.dataset.x)]; if (alt) { transact(() => { l.expr = alt.expr; l.fam = alt.fam; l.name = alt.name; fittedAnchors(l); }); refresh(); queueGraph(l.gid); setTimeout(renderLineMenu, 30); } return; }
   if (a === 'write') { closeLineMenu(); writeFitOnPage(l); return; }
+  if (a === 'wrt') { transact(() => { l.wrt = (anOf(l).choose ? anOf(l).choose.done : '') + b.dataset.v; l.ver = (l.ver || 0) + 1; }); refresh(); setTimeout(renderLineMenu, 30); return; }
+  if (a === 'rewrt') { transact(() => { l.wrt = ''; l.ver = (l.ver || 0) + 1; }); refresh(); setTimeout(renderLineMenu, 30); return; }
+  if (a === 'calc') { closeLineMenu(); writeCalcLine(l, b.dataset.op); return; }
+  if (a === 'dbl') {
+    const el = $('#lineMenu'), val = k => el.querySelector(`[data-b="${k}"]`).value.trim() || '0', inner = el.querySelector('[data-a="dblorder"][aria-pressed="true"]').dataset.o;
+    closeLineMenu(); writeCalcLine(l, 'dbl', { x0: val('x0'), x1: val('x1'), y0: val('y0'), y1: val('y1'), inner }); return;
+  }
+  if (a === 'dblorder') { b.parentNode.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x === b))); return; }
   if (a === 'fit') {   // picking the best one again goes back to "always the best" (it follows the table as it changes)
     const si = Number(b.dataset.s), se = anOf(l).series[si], best = se && se.fits[0] && se.fits[0].fam === b.dataset.f;
     transact(() => { const fs = Object.assign({}, l.fitSel); if (best) delete fs[si]; else fs[si] = b.dataset.f; l.fitSel = fs; l.ver = (l.ver || 0) + 1; });
@@ -5318,6 +5393,35 @@ function exprToHand(expr) {
   t = t.replace(/(π\/\d+)\*x/g, '($1)x');
   t = t.replace(/([0-9a-zπ)])\*(?=[a-zπ(√|])/g, '$1').replace(/\*/g, '×');
   return t;
+}
+// "which variable?": one button per variable, one step at a time (f'' and ∫∫ ask twice)
+function chooseHTML(c) {
+  const what = c.op === 'int' ? 'Integrate' : 'Differentiate';
+  return `<div class="lm-sec">${what} with respect to${c.step > 1 ? ` · step ${c.step}${c.done ? ` (first ${[...c.done].map(v => `<i>${esc(v)}</i>`).join(', ')})` : ''}` : ''}</div><div class="lm-wrt">${c.vars.map(v => `<button data-a="wrt" data-v="${esc(v)}">${c.op === 'int' ? `∫ … <i>d${esc(v)}</i>` : `∂/∂<i>${esc(v)}</i>`}</button>`).join('')}</div>`;
+}
+// a function of x and y: its partial derivatives and integrals, each written as a new line under it
+function partialsHTML(l, an) {
+  const P = [['x', '∂/∂<i>x</i>'], ['y', '∂/∂<i>y</i>'], ['xx', '∂²/∂<i>x</i>²'], ['xy', '∂²/∂<i>x</i>∂<i>y</i>'], ['yy', '∂²/∂<i>y</i>²']];
+  return `<div class="lm-sec">Partial derivatives</div><div class="lm-wrt">${P.map(([o, t]) => `<button data-a="calc" data-op="d${o}">${t}</button>`).join('')}</div>
+<div class="lm-sec">Integrals</div><div class="lm-wrt"><button data-a="calc" data-op="ix">∫ … <i>dx</i></button><button data-a="calc" data-op="iy">∫ … <i>dy</i></button></div>
+<div class="lm-sec">Double integral ∬ over a rectangle</div><div class="lm-dbl"><span class="rg"><input data-b="x0" value="0" inputmode="decimal" aria-label="x from"> ≤ <i>x</i> ≤ <input data-b="x1" value="1" inputmode="decimal" aria-label="x to"></span><span class="rg"><input data-b="y0" value="0" inputmode="decimal" aria-label="y from"> ≤ <i>y</i> ≤ <input data-b="y1" value="1" inputmode="decimal" aria-label="y to"></span>
+<span class="lm-seg sm" role="group" aria-label="Order"><button data-a="dblorder" data-o="x" aria-pressed="true"><i>dx dy</i></button><button data-a="dblorder" data-o="y" aria-pressed="false"><i>dy dx</i></button></span><button class="primary" data-a="dbl">Work it out</button></div>`;
+}
+function writeCalcLine(l, op, B) {
+  const an = anOf(l), named = an.name && /^[a-zA-Z]\(x, y\)$/.test(an.name), nm = named ? an.name[0] : 'z';
+  const body = named ? `${nm}(x, y)` : ME.toText(an.f).replace(/\s+/g, ''), bodyHand = named ? `${nm}(x,y)` : `(${exprToHand(body)})`;
+  let expr, hand;
+  if (op !== 'dbl' && op[0] === 'd') { const o = op.slice(1); expr = named ? `${nm}_${o}(x, y) =` : `diff(${body}, ${[...o].join(', ')}) =`; hand = `${nm}_${o}${named ? '(x,y)' : ''}=`; }
+  else if (op === 'ix' || op === 'iy') { const v = op[1]; expr = `int(${body}, ${v}) =`; hand = `∫${bodyHand}d${v}=`; }
+  else { const [i, o] = B.inner === 'x' ? ['x', 'y'] : ['y', 'x']; const lo = { x: B.x0, y: B.y0 }, hi = { x: B.x1, y: B.y1 };
+    expr = `int(int(${body}, ${i}, ${lo[i]}, ${hi[i]}), ${o}, ${lo[o]}, ${hi[o]}) =`; hand = `∫∫${bodyHand}d${i}d${o}=`; }
+  // under the line, below anything already written there
+  const lb = lineBB(l), h = Math.max(24, Math.min(40, lineCharH(l) || 30));
+  let y = lb.y1 + 0.6 * h;
+  for (let k = 0; k < 30; k++) { const box = { x0: lb.x0, x1: lb.x0 + 14 * h, y0: y, y1: y + 1.3 * h }; if (!doc.lines.some(o => o.strokeIds.length && !o.virtual && (() => { const b = lineBB(o); return b.x0 < box.x1 && b.x1 > box.x0 && b.y0 < box.y1 && b.y1 > box.y0; })())) break; y += 1.5 * h; }
+  let nl = null;
+  transact(() => { nl = writeLine(hand, lb.x0, y, h, 53 + l.id + op.length, INK[0]); applyReading(nl, expr, nl.clusters); });
+  syncInk(); markFresh(nl); refresh();
 }
 function writeFitOnPage(l) {
   const g = graphById(l.gid); if (!g) return;

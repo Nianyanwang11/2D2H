@@ -62,6 +62,7 @@ const HandFont = (() => {
     'N': { w: .64, s: [[[.07, 1], [.07, 0], [.55, 1], [.55, 0]]] },
     'E': { w: .54, s: [[[.48, 0], [.08, 0], [.08, 1], [.5, 1]], [[.08, .5], [.42, .5]]] },
     '∞': { w: .86, s: [[...arc(.23, .62, .19, .17, 0, 360, 20).map(([x, y]) => [x, y]), ...arc(.61, .62, .19, .17, 180, -180, 20)]] },
+    '∫': { w: .46, s: [[[.42, -.12], ...arc(.33, -.02, .09, .1, 0, -180, 8).map(([x, y]) => [x, y]), [.24, .3], [.2, .9], ...arc(.11, 1.04, .09, .1, 0, 180, 8)]] },
     '?': { w: .5, s: [[...arc(.24, .26, .2, .22, 200, 430, 12), [.24, .7]], dot(.24, .95)] },
   };
   function rng(seed) { let s = seed >>> 0 || 1; return () => { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; return ((s >>> 0) % 100000) / 100000; }; }
@@ -100,9 +101,10 @@ const HandFont = (() => {
     const R = rng(seed);
     const glyphs = [];
     let cx = x;
-    let sup = false, supLeft = 0, supEnd = -1;
+    let sup = false, supLeft = 0, supEnd = -1, sub = false;
     for (let i = 0; i < text.length; i++) {
       let ch = text[i];
+      if (sub && !/[a-z]/.test(ch)) sub = false;
       if (ch === ' ') { cx += h * 0.26; continue; }
       if (ch === '^' && text[i + 1] === '(') {   // ^( … ) : a whole group in superscript, brackets not drawn
         let d = 0, j = i + 1; for (; j < text.length; j++) { if (text[j] === '(') d++; else if (text[j] === ')' && --d === 0) break; }
@@ -110,11 +112,12 @@ const HandFont = (() => {
       }
       if (i === supEnd) { supEnd = -1; continue; }
       if (ch === '^') { sup = true; supLeft = 1; continue; }
+      if (ch === '_') { sub = true; continue; }
       const g = G[ch] || G['?'];
       const isSup = sup || i < supEnd;
       if (sup) { supLeft--; const nxt = text[i + 1]; if (!(nxt && /[0-9.]/.test(ch) && /[0-9.]/.test(nxt))) sup = false; }
-      const sc = (isSup ? 0.58 : 1) * h * (1 + (R() - 0.5) * 0.06);
-      const oy = y + (isSup ? -0.18 * h : 0) + (R() - 0.5) * 0.04 * h;
+      const sc = (isSup || sub ? 0.58 : 1) * h * (1 + (R() - 0.5) * 0.06);
+      const oy = y + (isSup ? -0.18 * h : sub ? 0.5 * h : 0) + (R() - 0.5) * 0.04 * h;
       const rot = (R() - 0.5) * 5 * D2R + 0.04;
       const ox = cx + (isSup ? 0.04 * h : 0);
       const strokes = g.s.map(st => {
@@ -138,13 +141,16 @@ const HandFont = (() => {
   function advance(text, h) {
     let w = 0;
     let sup = false, supEnd = -1;
+    let sub = false;
     for (let i = 0; i < text.length; i++) {
       const ch = text[i];
       if (ch === ' ') { w += h * 0.26; continue; }
       if (ch === '^' && text[i + 1] === '(') { let d = 0, j = i + 1; for (; j < text.length; j++) { if (text[j] === '(') d++; else if (text[j] === ')' && --d === 0) break; } supEnd = j; i++; continue; }
       if (i === supEnd) { supEnd = -1; continue; }
       if (ch === '^') { sup = true; continue; }
-      const g = G[ch] || G['?'], k = sup || i < supEnd ? 0.58 : 1;
+      if (ch === '_') { sub = true; continue; }
+      if (sub && !/[a-z]/.test(ch)) sub = false;
+      const g = G[ch] || G['?'], k = sup || sub || i < supEnd ? 0.58 : 1;
       if (sup && !(/[0-9.]/.test(ch) && /[0-9.]/.test(text[i + 1] || ''))) sup = false;
       w += g.w * h * k + h * 0.07;
     }

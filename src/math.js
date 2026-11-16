@@ -696,7 +696,17 @@ const Calc = (() => {
     if (n.t === 'num' && !Number.isInteger(n.v)) { const r = frac(n.v); if (r && r[1] <= 100) return r[0] < 0 ? neg(op('/', N(-r[0]), N(r[1]))) : op('/', N(r[0]), N(r[1])); }
     const o = Array.isArray(n) ? [] : {}; for (const k in n) o[k] = Array.isArray(n[k]) ? n[k].map(tidy) : (n[k] && typeof n[k] === 'object' ? tidy(n[k]) : n[k]); return o;
   }
-  const text = n => ME.toText(tidy(n)).replace(/\s+/g, '').replace(/\+-/g, '-').replace(/-\(-/g, '+(');
+  // (x²/2)·y² → x²y²/2: the fraction bar goes last, so the handwriting can't be read as x²/(2y²)
+  function divLast(n) {
+    if (!n || typeof n !== 'object') return n;
+    const o = Array.isArray(n) ? [] : {}; for (const k in n) o[k] = Array.isArray(n[k]) ? n[k].map(divLast) : (n[k] && typeof n[k] === 'object' ? divLast(n[k]) : n[k]);
+    if (o.t === 'op' && o.o === '*') {
+      if (o.a.t === 'op' && o.a.o === '/' && o.a.b.t === 'num') return op('/', divLast(op('*', o.a.a, o.b)), o.a.b);
+      if (o.b.t === 'op' && o.b.o === '/' && o.b.b.t === 'num') return op('/', divLast(op('*', o.a, o.b.a)), o.b.b);
+    }
+    return o;
+  }
+  const text = n => ME.toText(divLast(tidy(n))).replace(/\s+/g, '').replace(/\+-/g, '-').replace(/-\(-/g, '+(');
   return { antiderivative, subst, numText, bound, limit1, limit2, S, has, evalNum, V, op, run, text, frac };
 })();
 const CALC_RE = /(diff|int|liml|limr|lim)\s*\(|[a-zA-Z]'+\s*\(|[a-zA-Z]_[a-z]+\s*\(|\bd\s*\^?\s*\d*\s*\/\s*d\s*[a-z]/;
@@ -722,9 +732,17 @@ function calcExpand(src, fns, ctx, depth = 0) {
     if (j >= s.length) throw new Error('A "(" is missing its ")"');
     const raw = ME.splitTop(s.slice(open + 1, j), ',').map(a => a.trim());
     const prep = a => expandFnCalls(calcExpand(a, fns, ctx, depth + 1), fns);
+    // the variable, when it wasn't written: the only one there is, or the one picked in the menu
+    const pick = (vars, op) => {
+      if (vars.length <= 1) return vars[0] || 'x';
+      ctx.pos = ctx.pos || 0; const w = (ctx.wrt || '')[ctx.pos];
+      if (w && vars.includes(w)) { ctx.pos++; return w; }
+      const e = new Error('Choose the variable'); e.choose = { vars, op, step: ctx.pos + 1, done: (ctx.wrt || '').slice(0, ctx.pos) }; throw e;
+    };
+    const varsOf = t => { const fv = ME.freeVars(ME.parse(t)); const vs = ['x', 'y', 'z', 't'].filter(v => fv.has(v)); return vs.length ? vs : ['x']; };
     let rep;
     if (m[1] === 'diff') {
-      if (raw.length < 2) throw new Error('Write the variable too: diff(…, x)');
+      if (raw.length < 2) { const e0 = prep(raw[0]); raw.push(pick(varsOf(e0), 'diff')); raw[0] = e0; }
       let node = ME.parse(prep(raw[0])), lastV = null;
       for (const a of raw.slice(1)) {
         if (/^\d+$/.test(a)) { for (let k = 1; k < +a; k++) node = ME.derivative(node, lastV); continue; }
@@ -733,6 +751,7 @@ function calcExpand(src, fns, ctx, depth = 0) {
       }
       rep = '(' + ME.toText(Calc.S(node)) + ')'; ctx.calc = ctx.calc || 'derivative';
     } else if (m[1] === 'int') {
+      if (raw.length === 1 || raw.length === 3) { const e0 = prep(raw[0]); raw.splice(1, 0, pick(varsOf(e0), 'int')); raw[0] = e0; }
       if (raw.length !== 2 && raw.length !== 4) throw new Error('An integral needs its variable, and both bounds for a definite one');
       const v = raw[1]; if (!/^[a-zθ]$/.test(v)) throw new Error('Integrate with respect to a letter, like x');
       const f = ME.parse(prep(raw[0]));
@@ -780,11 +799,11 @@ function calcExpand(src, fns, ctx, depth = 0) {
       rep = Calc.numText(L); ctx.calc = 'limit';
     } else if (m[3]) {   // f'(…), f''(…)
       const F = fns[m[2]]; if (!F) throw new Error(`Define ${m[2]} first, like ${m[2]}(x) = …`);
-      if (F.vars.length !== 1) throw new Error(`${m[2]} has ${F.vars.length} variables: write ${m[2]}_${F.vars[0]} or ${m[2]}_${F.vars[1]}`);
       let node = ME.parse(expandFnCalls(calcExpand(F.body, fns, ctx, depth + 1), fns));
-      for (let k = 0; k < m[3].length; k++) node = ME.derivative(node, F.vars[0]);
-      if (raw.length !== 1) throw new Error(`${m[2]}${m[3]} takes one value`);
-      rep = '(' + substVars(ME.toText(Calc.S(node)), F.vars, [prep(raw[0])]) + ')'; ctx.calc = ctx.calc || 'derivative';
+      // f'(x, y): a partial derivative; which variable is picked in the menu (f'' asks twice)
+      for (let k = 0; k < m[3].length; k++) node = ME.derivative(node, F.vars.length === 1 ? F.vars[0] : pick(F.vars, 'diff'));
+      if (raw.length !== F.vars.length) throw new Error(`${m[2]}${m[3]} takes ${F.vars.length} value${F.vars.length > 1 ? 's' : ''}`);
+      rep = '(' + substVars(ME.toText(Calc.S(node)), F.vars, raw.map(prep)) + ')'; ctx.calc = ctx.calc || 'derivative';
     } else {   // f_x(…), f_xy(…)
       const F = fns[m[4]]; if (!F) { continue; }
       const order = m[5].split(''); if (order.some(v => !F.vars.includes(v))) throw new Error(`${m[4]} is a function of ${F.vars.join(', ')}`);
@@ -799,13 +818,13 @@ function calcExpand(src, fns, ctx, depth = 0) {
 }
 
 /* ===== Statement analysis: decides graph type / arithmetic / solve ===== */
-function analyzeStatement(rawExpr, fns) {
+function analyzeStatement(rawExpr, fns, opts = {}) {
   const ME = MathEngine;
   const src0 = ME.normalize(rawExpr);
   const def = parseFnDef(src0);
   let src = src0;
   // functions defined on other lines, then derivatives, integrals and limits: worked out and replaced by their results
-  const calc = {};
+  const calc = { wrt: opts.wrt || '', pos: 0 };
   try {
     const others = {}; for (const k in fns || {}) if (!def || k !== def.name) others[k] = fns[k];
     const k0 = def ? src0.indexOf('=') + 1 : 0;
@@ -819,8 +838,13 @@ function analyzeStatement(rawExpr, fns) {
     if (k0) body = ' ' + body.trim();
     src = src0.slice(0, k0) + body;
     if (src.replace(/\s+/g, '') === src0.replace(/\s+/g, '')) src = src0;
-  } catch (e) { return { src: src0, kind: 'error', error: e.message }; }
+  } catch (e) {
+    // which variable? (f'(x, y), ∫ xy, …): the menu asks, one step at a time
+    if (e.choose) return { src: src0, kind: 'choose', choose: e.choose, params: [] };
+    return { src: src0, kind: 'error', error: e.message };
+  }
   const res = { src, kind: 'unknown' };
+  if (calc.wrt) res.wrt = calc.wrt.slice(0, calc.pos);
   if (src !== src0) { res.expanded = true; res.orig = src0; }
   if (calc.calc) { res.calc = calc.calc; if (calc.dne) res.dne = calc.note || true; if (calc.plusC) res.plusC = true; }
   // a definition in other letters is graphed in x (and y): f(t) = t² → y = x², shown as f(t) = t²
