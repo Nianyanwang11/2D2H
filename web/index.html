@@ -1410,7 +1410,7 @@ const Calc = (() => {
     }
     return val;
   }
-  const evalNum = t => { const v = ME.compile(ME.parse(t))({}, 0); if (!isFinite(v)) throw new Error('A bound must be a number'); return v; };
+  const evalNum = t => { const v = ME.compile(ME.parse(t))({}, 0); if (!isFinite(v)) throw new Error(`the point or bound “${t}” must be a number`); return v; };
   // formulas as written by hand: x^3/3 instead of 0.3333*x^3, no spaces
   // (fifths and tenths stay decimals: 9.8t, not 49t/5)
   function frac(y) { for (let q = 1; q <= 100; q++) { if (q % 5 === 0) continue; const p = Math.round(y * q); if (Math.abs(p / q - y) < 1e-9 * Math.max(1, Math.abs(y))) return [p, q]; } return null; }
@@ -3579,6 +3579,17 @@ function buildLineFromEquals(pair, pool, th = eqAngle(pair)) {
     const overlaps = [...inLine].some(m => { const mb = box(m); const ov = Math.min(mb.x1, b.x1) - Math.max(mb.x0, b.x0); return ov > 0.5 * Math.min(mb.w || 1, b.w || 1); });
     if (overlaps) inLine.add(id);
   }
+  // tall signs (∫, Σ, big brackets) carry small marks at their top and bottom: an integral's bounds
+  for (let pass = 0; pass < 2; pass++) for (const m of [...inLine]) {
+    const mb = box(m); if (!mb || mb.h < 1.5 * s) continue;
+    for (const id of pool) {
+      if (inLine.has(id)) continue;
+      const b = box(id); if (!b || b.h > 1.2 * s) continue;
+      const nearX = b.x0 <= mb.x1 + 1.4 * s && b.x1 >= mb.x0 - 0.8 * s;
+      const nearY = b.cy >= mb.y0 - 0.9 * s && b.cy <= mb.y1 + 0.9 * s;
+      if (nearX && nearY) inLine.add(id);
+    }
+  }
   const ids = [...inLine];
   // a long line: follow the slant of the writing itself, not only of the "=" (its bars are short)
   if (arguments.length < 3) {
@@ -3999,6 +4010,8 @@ The ink is split into exactly ${n} separate clusters, spaced apart, left to righ
 Reply with only a JSON object: {"expr": string, "clusters": string[], "ok": boolean}
 - "clusters": exactly ${n} strings, one per ink cluster in left-to-right order: what is written in that cluster. Usually one symbol ("2", "x", "=", "+", "(", "θ"). A cluster may hold several symbols if they touch (e.g. "sin", "12") or are stacked (a fraction like "(x+1)/2").
 - "expr": the whole line as plain-text math: + - * / ^ ( ) with explicit * for multiplication; functions sin cos tan sec csc cot asin acos atan sinh cosh tanh ln log sqrt abs exp; constants pi and e; write θ as theta. Small raised symbols are exponents (x^2). Keep every number exactly as written. Keep a trailing "=" if nothing follows it. Two equations on one line separated by a comma stay comma-separated.
+- Under "lim" the point being approached is almost always numbers: (x, y) → (0, 1) is (0, 1); a small round 0 is a zero, not the letter a or o. Write ∞ as inf.
+- An integral sign with small numbers at its bottom and top is a definite integral: those are its bounds (bottom = lower, top = upper) and must always be kept: ∫₀¹ x² dx → int(x^2, x, 0, 1). The bound clusters are part of the line.
 - Calculus is written in these forms: derivatives f'(x), f''(2), d/dx(x^2*sin(x)), d^2/dx^2(…), partial derivatives diff(x^2*y, x) or f_x(x, y), f_xy(1, 2); integrals int(x^2, x) and int(x^2, x, 0, 1) (lower bound, then upper), a double integral int(int(x*y, x, 0, 1), y, 0, 2); limits lim(sin(x)/x, x, 0), lim(1/x, x, inf), from one side limr(…) or liml(…), two variables lim(x*y/(x^2+y^2), (x, y), (0, 0)). Leave out "dx".
 - Function notation stays as written, with its name and variables: f(x) = x^2, f(x, y) = x^2 + y^2, g(t) = 3*t, f(1, 2) =, z = f(x, y). The comma between variables belongs to the function; it does not split the line.
 - "ok": false if the line is not math.
@@ -4698,11 +4711,13 @@ function renderLineMenu() {
   const ok = loopState(l) === 'ok', an = ok ? anOf(l) : null;
   const isData = !!an && (an.kind === 'data' || an.kind === 'data3d');
   const CALC_LABEL = { derivative: 'Derivative', integral: 'Integral', limit: 'Limit' };
-  let h = `<div class="lm-head"><span class="lm-kind">${l.fittedFrom ? 'Fit to your table' : l.fitted ? 'From your sketch' : an && an.calc ? CALC_LABEL[an.calc] + (an.answer ? ' · graphable' : '') : an ? (KIND_LABEL[an.kind] || 'Math') : l.layout === 'table' ? 'Table · not read' : 'Not read'}</span><span class="lm-math">${an ? lineMathHTML(l, an) : (l.expr ? esc(l.expr) : '')}</span><button class="lm-x" data-a="close" aria-label="Close">×</button></div>`;
+  let h = `<div class="lm-head"><span class="lm-kind">${l.fittedFrom ? 'Fit to your table' : l.fitted ? 'From your sketch' : an && an.calc ? CALC_LABEL[an.calc] + (an.answer ? ' · graphable' : '') : an ? (KIND_LABEL[an.kind] || 'Math') : l.layout === 'table' ? 'Table · not read' : l.status === 'ok' && l.expr && !l.dirty ? 'Read · needs a fix' : 'Not read'}</span><span class="lm-math">${an ? lineMathHTML(l, an) : (l.expr ? esc(l.expr) : '')}</span><button class="lm-x" data-a="close" aria-label="Close">×</button></div>`;
   lmenu.rows = [];
   if (!an) {
-    const why = l.status === 'unavailable' ? 'Handwriting can only be read when this page is open in Claude.' : l.status === 'notmath' ? 'This doesn’t look like math.' : l.status === 'error' ? (l.err || 'Couldn’t read this line.') : 'This line hasn’t been read yet.';
-    h += `<p class="lm-note">${esc(why)}</p><div class="lm-foot">${readState.ok !== false ? '<button data-a="read">Read now</button>' : ''}<button data-a="edit">Type it</button><button data-a="ignore">Not math</button></div>`;
+    // read, but it can't be worked out: say why, and offer to fix the reading
+    const bad = l.status === 'ok' && !l.dirty && l.expr ? anOf(l) : null;
+    const why = bad ? `Read as above, but it can’t be worked out${bad.error ? ': ' + bad.error : ''}. If something was misread, fix it.` : l.status === 'unavailable' ? 'Handwriting can only be read when this page is open in Claude.' : l.status === 'notmath' ? 'This doesn’t look like math.' : l.status === 'error' ? (l.err || 'Couldn’t read this line.') : 'This line hasn’t been read yet.';
+    h += `<p class="lm-note">${esc(why)}</p><div class="lm-foot">${bad ? '<button data-a="edit">✎ Fix reading</button><button data-a="read">Read again</button>' : `${readState.ok !== false ? '<button data-a="read">Read now</button>' : ''}<button data-a="edit">Type it</button>`}<button data-a="ignore">Not math</button></div>`;
   } else {
     const v = verdict(l); if (v) h += `<p class="lm-note ${v.ok ? 'ok' : 'bad'}">${v.ok ? '✓ ' : ''}${esc(v.full)}</p>`;
     const solid = an.kind === 'solid';

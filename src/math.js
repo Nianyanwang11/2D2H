@@ -686,7 +686,7 @@ const Calc = (() => {
     }
     return val;
   }
-  const evalNum = t => { const v = ME.compile(ME.parse(t))({}, 0); if (!isFinite(v)) throw new Error('A bound must be a number'); return v; };
+  const evalNum = t => { const v = ME.compile(ME.parse(t))({}, 0); if (!isFinite(v)) throw new Error(`the point or bound “${t}” must be a number`); return v; };
   // formulas as written by hand: x^3/3 instead of 0.3333*x^3, no spaces
   // (fifths and tenths stay decimals: 9.8t, not 49t/5)
   function frac(y) { for (let q = 1; q <= 100; q++) { if (q % 5 === 0) continue; const p = Math.round(y * q); if (Math.abs(p / q - y) < 1e-9 * Math.max(1, Math.abs(y))) return [p, q]; } return null; }
