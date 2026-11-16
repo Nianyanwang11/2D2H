@@ -3922,7 +3922,7 @@ function getSampler() {
   }
   return samplerP;
 }
-function setRead(ok, msg) { readState = { ok, msg }; renderReadPill(); }
+function setRead(ok, msg) { readState = { ok, msg }; renderReadPill(); if (ok === false && !setRead.retried) { setRead.retried = true; setTimeout(() => { if (readState.ok === false) { samplerP = null; getSampler().then(s => { if (s) onIdle(); }); } }, 4000); } }
 function renderReadPill() {
   const b = $('#autoread');
   b.classList.toggle('on', ui.autoRead && readState.ok !== false);
@@ -7475,7 +7475,18 @@ $('#swatches').addEventListener('click', e => { const b = e.target.closest('.sw'
 $('#widths').addEventListener('click', e => { const b = e.target.closest('.wd'); if (!b) return; ui.width[ui.tool] = Number(b.dataset.w); renderSwatches(); });
 document.querySelectorAll('[data-tool]').forEach(b => b.addEventListener('click', () => setTool(b.dataset.tool)));
 $('#undo').onclick = undo; $('#redo').onclick = redo;
-$('#autoread').onclick = () => { ui.autoRead = !ui.autoRead; renderReadPill(); scheduleSave(); if (ui.autoRead) { getSampler(); onIdle(); } };
+// "Reading off": tapping it tries again (or asks for the key in the iPad app), it never stays stuck
+$('#autoread').onclick = async () => {
+  if (readState.ok === false) {
+    if (STANDALONE && !(window.claude && typeof window.claude.use === 'function') && !apiKey()) { openKeyDialog(); return; }
+    samplerP = null; ui.autoRead = true; setRead(null, 'Checking…');
+    const s = await getSampler();
+    toast(s ? 'Reading is on' : readState.msg);
+    if (s) { for (const l of doc.lines) if (l.status === 'unavailable' || l.status === 'idle') { l.status = 'new'; l.dirty = true; } scheduleSave(); onIdle(); }
+    return;
+  }
+  ui.autoRead = !ui.autoRead; renderReadPill(); scheduleSave(); if (ui.autoRead) { getSampler(); onIdle(); }
+};
 function closeMenus() { document.querySelectorAll('.menu').forEach(m => { m.hidden = true; }); document.querySelectorAll('[aria-expanded]').forEach(b => b.setAttribute('aria-expanded', 'false')); }
 function toggleMenu(btn, menu) {
   const open = menu.hidden; closeMenus();

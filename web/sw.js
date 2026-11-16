@@ -1,5 +1,5 @@
 /* Keeps the web app working offline once it has been opened. The version below changes with every build. */
-const CACHE = 'lmn-7282790852';
+const CACHE = 'lmn-030d8ccb6d';
 const CORE = ['./', 'index.html', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {
